@@ -22,7 +22,7 @@ fn default_min_duty_delta() -> u8 {
     DEFAULT_MIN_DUTY_DELTA
 }
 
-/// Top-level OpenNX configuration stored as TOML.
+/// Top-level nxctl configuration stored as TOML.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub default_profile: String,
@@ -122,12 +122,12 @@ pub enum CoolingTarget {
 }
 
 impl Config {
-    /// Returns the default configuration file path (`~/.config/opennx/config.toml`).
+    /// Returns the default configuration file path (`~/.config/nxctl/config.toml`).
     pub fn default_path() -> Result<PathBuf> {
         let base = dirs::config_dir().ok_or_else(|| {
             CoreError::Validation("could not determine user configuration directory".to_string())
         })?;
-        Ok(base.join("opennx").join("config.toml"))
+        Ok(base.join("nxctl").join("config.toml"))
     }
 
     /// Loads and validates configuration from `path`, or [`Config::default_path`] when `None`.
@@ -420,7 +420,7 @@ mod tests {
 
     fn temp_file_path(name: &str) -> PathBuf {
         let unique = format!(
-            "opennx_core_test_{}_{}_{}.toml",
+            "nxctl_core_test_{}_{}_{}.toml",
             name,
             std::process::id(),
             std::time::SystemTime::now()
@@ -428,7 +428,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        std::env::temp_dir().join("opennx-core-tests").join(unique)
+        std::env::temp_dir().join("nxctl-core-tests").join(unique)
     }
 
     #[test]
@@ -561,8 +561,8 @@ cooling = []
     }
 
     #[test]
-    fn default_path_ends_with_opennx_config_toml() {
+    fn default_path_ends_with_nxctl_config_toml() {
         let path = Config::default_path().expect("default path");
-        assert!(path.ends_with(Path::new("opennx").join("config.toml")));
+        assert!(path.ends_with(Path::new("nxctl").join("config.toml")));
     }
 }

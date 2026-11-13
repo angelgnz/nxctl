@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/opennx-core",
+    "crates/nxctl-core",
     "crates/nxctl",
-    "crates/opennxd",
+    "crates/nxctld",
 ]
 
 [workspace.package]

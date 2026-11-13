@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use opennx_core::config::Config;
-use opennx_core::engine::apply_profile;
-use opennx_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
+use nxctl_core::config::Config;
+use nxctl_core::engine::apply_profile;
+use nxctl_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
 
 #[derive(Parser)]
 #[command(name = "nxctl", version, about = "Control de dispositivos NZXT vía liquidctl")]

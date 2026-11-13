@@ -1,9 +1,9 @@
-# OpenNX
+# nxctl
 
 Alternativa open source a NZXT CAM en Linux, sobre [liquidctl](https://github.com/liquidctl/liquidctl).
 
 - `nxctl`: CLI para estado, perfiles y ajustes manuales.
-- `opennxd`: daemon que ajusta ventiladores según temperatura (con histéresis).
+- `nxctld`: daemon que ajusta ventiladores según temperatura (con histéresis).
 
 ## Instalación
 
@@ -11,7 +11,7 @@ Requiere `liquidctl` en el `PATH` y Rust (edición 2024).
 
 ```sh
 cargo build --release
-sudo install -m755 target/release/{nxctl,opennxd} /usr/local/bin/
+sudo install -m755 target/release/{nxctl,nxctld} /usr/local/bin/
 ```
 
 ## Uso
@@ -28,13 +28,13 @@ nxctl profiles show <NOMBRE>
 
 Flags globales: `--config <RUTA>`, `--dry-run`, `-v/--verbose`.
 
-## Servicio `opennxd`
+## Servicio `nxctld`
 
 ```sh
-opennxd --once --dry-run -v   # prueba: un tick sin cambios reales
-sudo mkdir -p /etc/opennx && sudo cp ~/.config/opennx/config.toml /etc/opennx/config.toml
-sudo cp contrib/opennxd.service /etc/systemd/system/
-sudo systemctl enable --now opennxd
+nxctld --once --dry-run -v   # prueba: un tick sin cambios reales
+sudo mkdir -p /etc/nxctl && sudo cp ~/.config/nxctl/config.toml /etc/nxctl/config.toml
+sudo cp contrib/nxctld.service /etc/systemd/system/
+sudo systemctl enable --now nxctld
 ```
 
 Ajusta la ruta de `--config` en la unit según tu instalación. Para unit de usuario,

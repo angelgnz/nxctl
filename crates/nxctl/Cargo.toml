@@ -9,7 +9,7 @@ name = "nxctl"
 path = "src/main.rs"
 
 [dependencies]
-opennx-core = { path = "../opennx-core" }
+nxctl-core = { path = "../nxctl-core" }
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true

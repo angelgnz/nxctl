@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use opennx_core::config::Config;
-use opennx_core::curve::HysteresisController;
-use opennx_core::engine::{apply_profile, step_daemon_tick};
-use opennx_core::liquidctl::CliLiquidctlBackend;
+use nxctl_core::config::Config;
+use nxctl_core::curve::HysteresisController;
+use nxctl_core::engine::{apply_profile, step_daemon_tick};
+use nxctl_core::liquidctl::CliLiquidctlBackend;
 
 #[derive(Parser)]
-#[command(name = "opennxd", version, about = "Daemon de control térmico/iluminación NZXT")]
+#[command(name = "nxctld", version, about = "Daemon de control térmico/iluminación NZXT")]
 struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
@@ -78,6 +78,6 @@ fn main() -> Result<()> {
             left -= d;
         }
     }
-    tracing::info!("opennxd detenido");
+    tracing::info!("nxctld detenido");
     Ok(())
 }

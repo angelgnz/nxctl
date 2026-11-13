@@ -1,15 +1,15 @@
 [package]
-name = "opennxd"
+name = "nxctld"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "opennxd"
+name = "nxctld"
 path = "src/main.rs"
 
 [dependencies]
-opennx-core = { path = "../opennx-core" }
+nxctl-core = { path = "../nxctl-core" }
 anyhow.workspace = true
 clap.workspace = true
 ctrlc = { workspace = true, features = ["termination"] }

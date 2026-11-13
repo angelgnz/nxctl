@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Errors returned by `opennx-core` operations.
+/// Errors returned by `nxctl-core` operations.
 #[derive(Debug, Error)]
 pub enum CoreError {
     #[error("I/O error: {0}")]
@@ -32,5 +32,5 @@ pub enum CoreError {
     Validation(String),
 }
 
-/// Convenience result alias for `opennx-core`.
+/// Convenience result alias for `nxctl-core`.
 pub type Result<T> = std::result::Result<T, CoreError>;
