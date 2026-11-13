@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenNX daemon (control de ventiladores/iluminación NZXT)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/opennxd --config /etc/opennx/config.toml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

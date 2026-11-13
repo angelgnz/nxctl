@@ -1,0 +1,17 @@
+[package]
+name = "opennxd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "opennxd"
+path = "src/main.rs"
+
+[dependencies]
+opennx-core = { path = "../opennx-core" }
+anyhow.workspace = true
+clap.workspace = true
+ctrlc = { workspace = true, features = ["termination"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true

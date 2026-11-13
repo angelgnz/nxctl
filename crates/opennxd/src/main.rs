@@ -1,0 +1,83 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use opennx_core::config::Config;
+use opennx_core::curve::HysteresisController;
+use opennx_core::engine::{apply_profile, step_daemon_tick};
+use opennx_core::liquidctl::CliLiquidctlBackend;
+
+#[derive(Parser)]
+#[command(name = "opennxd", version, about = "Daemon de control térmico/iluminación NZXT")]
+struct Cli {
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Perfil a usar (por defecto config.default_profile)
+    #[arg(long)]
+    profile: Option<String>,
+    /// Ejecuta un solo tick y sale
+    #[arg(long)]
+    once: bool,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let level = match cli.verbose {
+        0 => "info",
+        1 => "debug",
+        _ => "trace",
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level)),
+        )
+        .init();
+
+    let config = Config::load(cli.config.as_deref())?;
+    let profile = cli.profile.unwrap_or_else(|| config.default_profile.clone());
+    let backend = CliLiquidctlBackend::new();
+    let mut controller = HysteresisController::new(
+        config.daemon.hysteresis_celsius,
+        config.daemon.min_duty_delta,
+    );
+
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let r = running.clone();
+        ctrlc::set_handler(move || r.store(false, Ordering::SeqCst))
+            .context("instalando manejador de señales")?;
+    }
+
+    let report = apply_profile(&backend, &config, &profile, cli.dry_run)
+        .with_context(|| format!("aplicando perfil inicial '{profile}'"))?;
+    tracing::info!(?report, "perfil '{profile}' aplicado");
+
+    let interval = Duration::from_secs(config.daemon.poll_interval_secs);
+    while running.load(Ordering::SeqCst) {
+        match step_daemon_tick(&backend, &config, &profile, &mut controller, cli.dry_run) {
+            Ok(changes) => tracing::debug!(?changes, "tick"),
+            Err(e) => tracing::warn!("error en tick: {e}"),
+        }
+        if cli.once {
+            break;
+        }
+        // Dormir en tramos cortos para responder rápido a SIGINT/SIGTERM.
+        let mut left = interval;
+        let step = Duration::from_millis(250);
+        while running.load(Ordering::SeqCst) && !left.is_zero() {
+            let d = left.min(step);
+            std::thread::sleep(d);
+            left -= d;
+        }
+    }
+    tracing::info!("opennxd detenido");
+    Ok(())
+}
