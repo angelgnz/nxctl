@@ -155,26 +155,29 @@ fn read_sensor_temp(
     backend: &dyn LiquidctlBackend,
     sensor_ref: &TempSensorRef,
 ) -> Result<std::result::Result<f32, String>> {
-    if !cache.contains_key(&sensor_ref.match_device) {
-        let statuses = backend.status(Some(&sensor_ref.match_device))?;
-        cache.insert(sensor_ref.match_device.clone(), statuses);
+    let (match_device, key) = match sensor_ref {
+        TempSensorRef::Hwmon { hwmon, label } => {
+            return Ok(crate::hwmon::read_hwmon_temp(hwmon, label.as_deref()));
+        }
+        TempSensorRef::Liquidctl { match_device, key } => (match_device, key),
+    };
+    if !cache.contains_key(match_device) {
+        let statuses = backend.status(Some(match_device))?;
+        cache.insert(match_device.clone(), statuses);
     }
 
-    let devices = &cache[&sensor_ref.match_device];
+    let devices = &cache[match_device];
     if devices.is_empty() {
-        return Ok(Err(format!(
-            "no devices matched sensor '{}'",
-            sensor_ref.match_device
-        )));
+        return Ok(Err(format!("no devices matched sensor '{}'", match_device)));
     }
 
     for device in devices {
-        if let Some(reading) = device.status.iter().find(|r| r.key == sensor_ref.key) {
+        if let Some(reading) = device.status.iter().find(|r| r.key == *key) {
             return match reading.value.as_f64() {
                 Some(val) if val.is_finite() => Ok(Ok(val as f32)),
                 _ => Ok(Err(format!(
                     "sensor reading '{}' on '{}' is not a finite number",
-                    sensor_ref.key, device.description
+                    key, device.description
                 ))),
             };
         }
@@ -182,7 +185,7 @@ fn read_sensor_temp(
 
     Ok(Err(format!(
         "sensor key '{}' not found on device(s) matching '{}'",
-        sensor_ref.key, sensor_ref.match_device
+        key, match_device
     )))
 }
 
@@ -292,10 +295,8 @@ mod tests {
     fn step_daemon_tick_respects_hysteresis_and_emits_speed_changes() {
         let cfg = Config::starter_nzxt();
         let mock = MockLiquidctlBackend::with_statuses(vec![kraken_with_temp(35.0)]);
-        let mut controller = HysteresisController::new(
-            cfg.daemon.hysteresis_celsius,
-            cfg.daemon.min_duty_delta,
-        );
+        let mut controller =
+            HysteresisController::new(cfg.daemon.hysteresis_celsius, cfg.daemon.min_duty_delta);
 
         // Tick 1 at 35C: quiet curve maps 35C -> 45% on all 4 channels.
         let changes1 =
@@ -336,7 +337,7 @@ mod tests {
         cfg.daemon.temp_sensor = None;
         cfg.profiles.get_mut("silent").unwrap().cooling[0].target = CoolingTarget::Curve {
             curve: "quiet".to_string(),
-            sensor: Some(crate::config::TempSensorRef {
+            sensor: Some(crate::config::TempSensorRef::Liquidctl {
                 match_device: "kraken".to_string(),
                 key: "Liquid temperature".to_string(),
             }),
@@ -357,5 +358,22 @@ mod tests {
             step_daemon_tick(&mock, &cfg, "silent", &mut ctrl2, false).expect("tick override");
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].duty, 70);
+    }
+
+    #[test]
+    fn read_sensor_temp_hwmon_missing_device_returns_inner_err() {
+        let mock = MockLiquidctlBackend::with_statuses(vec![]);
+        let mut cache = HashMap::new();
+        let r = read_sensor_temp(
+            &mut cache,
+            &mock,
+            &TempSensorRef::Hwmon {
+                hwmon: "definitely-not-a-real-hwmon".into(),
+                label: None,
+            },
+        )
+        .expect("outer ok");
+        assert!(r.is_err());
+        assert!(mock.calls().is_empty());
     }
 }

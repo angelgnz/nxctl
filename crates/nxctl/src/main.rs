@@ -2,9 +2,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use nxctl_core::config::Config;
-use nxctl_core::engine::apply_profile;
+use nxctl_core::config::{
+    Config, CoolingRule, CoolingTarget, FanCurve, LightingRule, TempSensorRef,
+};
+use nxctl_core::engine::{ApplyReport, apply_profile};
 use nxctl_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
+use nxctl_core::list_hwmon_sensors;
 
 #[derive(Parser)]
 #[command(name = "nxctl", version, about = "Control de dispositivos NZXT vía liquidctl")]
@@ -29,10 +32,22 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Inicializa los dispositivos vía liquidctl
+    InitDevices {
+        #[arg(long = "match")]
+        match_: Option<String>,
+    },
+    /// Valida el archivo de configuración sin aplicar cambios
+    Validate,
     /// Muestra el estado de los dispositivos
     Status {
         #[arg(long = "match")]
         match_: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Lista los sensores de temperatura del sistema (hwmon)
+    Sensors {
         #[arg(long)]
         json: bool,
     },
@@ -44,6 +59,9 @@ enum Command {
     /// Gestión de perfiles
     #[command(subcommand)]
     Profiles(ProfilesCmd),
+    /// Inspección de curvas de ventilación
+    #[command(subcommand)]
+    Curves(CurvesCmd),
 }
 
 #[derive(Subcommand)]
@@ -70,6 +88,68 @@ enum SetCmd {
 enum ProfilesCmd {
     List,
     Show { name: String },
+}
+
+#[derive(Subcommand)]
+enum CurvesCmd {
+    List,
+    Show { name: String },
+}
+
+fn format_lighting_rule(rule: &LightingRule) -> String {
+    if rule.colors.is_empty() {
+        format!("{}/{} -> modo {}", rule.match_device, rule.channel, rule.mode)
+    } else {
+        format!(
+            "{}/{} -> modo {} [{}]",
+            rule.match_device,
+            rule.channel,
+            rule.mode,
+            rule.colors.join(", ")
+        )
+    }
+}
+
+fn format_cooling_rule(rule: &CoolingRule) -> String {
+    match &rule.target {
+        CoolingTarget::Fixed { duty } => {
+            format!("{}/{} -> fijo {}%", rule.match_device, rule.channel, duty)
+        }
+        CoolingTarget::Curve { curve, sensor } => match sensor {
+            Some(TempSensorRef::Liquidctl { match_device, key }) => format!(
+                "{}/{} -> curva '{curve}' (sensor {match_device}/{key})",
+                rule.match_device, rule.channel
+            ),
+            Some(TempSensorRef::Hwmon {
+                hwmon,
+                label: Some(label),
+            }) => format!(
+                "{}/{} -> curva '{curve}' (sensor hwmon:{hwmon}/{label})",
+                rule.match_device, rule.channel
+            ),
+            Some(TempSensorRef::Hwmon { hwmon, label: None }) => format!(
+                "{}/{} -> curva '{curve}' (sensor hwmon:{hwmon})",
+                rule.match_device, rule.channel
+            ),
+            None => format!("{}/{} -> curva '{curve}'", rule.match_device, rule.channel),
+        },
+    }
+}
+
+fn format_curve_summary(name: &str, curve: &FanCurve) -> String {
+    let points: Vec<String> = curve
+        .points
+        .iter()
+        .map(|p| format!("{}°C -> {}%", p.temp_c, p.duty))
+        .collect();
+    format!("{name:<16} {}", points.join(", "))
+}
+
+fn format_apply_report(name: &str, report: &ApplyReport) -> String {
+    format!(
+        "Perfil '{name}' aplicado: {} iluminación, {} refrigeración",
+        report.lighting_applied, report.cooling_applied
+    )
 }
 
 fn init_tracing(verbose: u8) {
@@ -105,6 +185,22 @@ fn main() -> Result<()> {
             let saved = Config::starter_nzxt().save(Some(&path))?;
             println!("Configuración creada en {}", saved.display());
         }
+        Command::InitDevices { match_ } => {
+            backend.initialize(match_.as_deref(), cli.dry_run)?;
+            match match_ {
+                Some(pattern) => println!("Dispositivos '{pattern}' inicializados"),
+                None => println!("Dispositivos inicializados"),
+            }
+        }
+        Command::Validate => {
+            let config = Config::load(cfg_path)?;
+            println!(
+                "Configuración válida (perfil por defecto: '{}', {} perfiles, {} curvas)",
+                config.default_profile,
+                config.profiles.len(),
+                config.curves.len()
+            );
+        }
         Command::Status { match_, json } => {
             let devices = backend.status(match_.as_deref())?;
             if json {
@@ -122,12 +218,30 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Sensors { json } => {
+            let sensors = list_hwmon_sensors().context("listando sensores hwmon")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&sensors)?);
+            } else if sensors.is_empty() {
+                println!("No se encontraron sensores hwmon.");
+            } else {
+                println!("{:<10} {:<16} {:<24} {:>8}", "DEVICE", "NAME", "LABEL", "TEMP");
+                for s in &sensors {
+                    let label = s.label.as_deref().unwrap_or(&s.input_file);
+                    let temp = format!("{:.1} °C", s.temp_c);
+                    println!("{:<10} {:<16} {:<24} {:>8}", s.device_dir, s.name, label, temp);
+                }
+            }
+        }
         Command::Apply { profile } => {
             let config = Config::load(cfg_path)?;
             let name = profile.unwrap_or_else(|| config.default_profile.clone());
             let report = apply_profile(&backend, &config, &name, cli.dry_run)
                 .with_context(|| format!("aplicando perfil '{name}'"))?;
-            println!("Perfil '{name}' aplicado: {report:?}");
+            println!("{}", format_apply_report(&name, &report));
+            for warning in &report.warnings {
+                eprintln!("Aviso: {warning}");
+            }
         }
         Command::Set(SetCmd::Color { match_, channel, mode, colors }) => {
             backend.set_color(&match_, &channel, &mode, &colors, cli.dry_run)?;
@@ -158,14 +272,165 @@ fn main() -> Result<()> {
                 println!("Descripción: {d}");
             }
             println!("Iluminación:");
-            for r in &p.lighting {
-                println!("  {r:?}");
+            if p.lighting.is_empty() {
+                println!("  (sin reglas)");
+            } else {
+                for r in &p.lighting {
+                    println!("  {}", format_lighting_rule(r));
+                }
             }
             println!("Refrigeración:");
-            for r in &p.cooling {
-                println!("  {r:?}");
+            if p.cooling.is_empty() {
+                println!("  (sin reglas)");
+            } else {
+                for r in &p.cooling {
+                    println!("  {}", format_cooling_rule(r));
+                }
+            }
+        }
+        Command::Curves(CurvesCmd::List) => {
+            let config = Config::load(cfg_path)?;
+            if config.curves.is_empty() {
+                println!("No hay curvas configuradas.");
+            } else {
+                for (name, curve) in &config.curves {
+                    println!("{}", format_curve_summary(name, curve));
+                }
+            }
+        }
+        Command::Curves(CurvesCmd::Show { name }) => {
+            let config = Config::load(cfg_path)?;
+            let curve = config
+                .curves
+                .get(&name)
+                .with_context(|| format!("curva '{name}' no existe"))?;
+            println!("Curva: {name}");
+            for p in &curve.points {
+                println!("  {:>5.1}°C -> {:>3}%", p.temp_c, p.duty);
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nxctl_core::config::{CurvePoint, TempSensorRef};
+
+    #[test]
+    fn cli_parses_new_subcommands() {
+        let validate = Cli::try_parse_from(["nxctl", "--dry-run", "validate"]).unwrap();
+        assert!(validate.dry_run);
+        assert!(matches!(validate.command, Command::Validate));
+
+        let init_dev =
+            Cli::try_parse_from(["nxctl", "init-devices", "--match", "kraken"]).unwrap();
+        assert!(matches!(
+            init_dev.command,
+            Command::InitDevices { match_: Some(ref m) } if m == "kraken"
+        ));
+
+        let curves_list = Cli::try_parse_from(["nxctl", "curves", "list"]).unwrap();
+        assert!(matches!(curves_list.command, Command::Curves(CurvesCmd::List)));
+
+        let curves_show = Cli::try_parse_from(["nxctl", "curves", "show", "silent"]).unwrap();
+        assert!(matches!(
+            curves_show.command,
+            Command::Curves(CurvesCmd::Show { ref name }) if name == "silent"
+        ));
+
+        let sensors_json = Cli::try_parse_from(["nxctl", "sensors", "--json"]).unwrap();
+        assert!(matches!(sensors_json.command, Command::Sensors { json: true }));
+
+        let sensors = Cli::try_parse_from(["nxctl", "sensors"]).unwrap();
+        assert!(matches!(sensors.command, Command::Sensors { json: false }));
+    }
+
+    #[test]
+    fn formatting_helpers_produce_human_readable_output() {
+        let lighting = LightingRule {
+            match_device: "kraken".into(),
+            channel: "ring".into(),
+            mode: "fixed".into(),
+            colors: vec!["ff0000".into()],
+        };
+        assert_eq!(
+            format_lighting_rule(&lighting),
+            "kraken/ring -> modo fixed [ff0000]"
+        );
+
+        let cooling_fixed = CoolingRule {
+            match_device: "kraken".into(),
+            channel: "pump".into(),
+            target: CoolingTarget::Fixed { duty: 75 },
+        };
+        assert_eq!(format_cooling_rule(&cooling_fixed), "kraken/pump -> fijo 75%");
+
+        let cooling_curve = CoolingRule {
+            match_device: "smart".into(),
+            channel: "fan1".into(),
+            target: CoolingTarget::Curve {
+                curve: "quiet".into(),
+                sensor: Some(TempSensorRef::Liquidctl {
+                    match_device: "kraken".into(),
+                    key: "Liquid temperature".into(),
+                }),
+            },
+        };
+        assert_eq!(
+            format_cooling_rule(&cooling_curve),
+            "smart/fan1 -> curva 'quiet' (sensor kraken/Liquid temperature)"
+        );
+
+        let cooling_hwmon = CoolingRule {
+            match_device: "smart".into(),
+            channel: "fan2".into(),
+            target: CoolingTarget::Curve {
+                curve: "perf".into(),
+                sensor: Some(TempSensorRef::Hwmon {
+                    hwmon: "k10temp".into(),
+                    label: Some("Tctl".into()),
+                }),
+            },
+        };
+        assert_eq!(
+            format_cooling_rule(&cooling_hwmon),
+            "smart/fan2 -> curva 'perf' (sensor hwmon:k10temp/Tctl)"
+        );
+
+        let cooling_hwmon_nolabel = CoolingRule {
+            match_device: "smart".into(),
+            channel: "fan3".into(),
+            target: CoolingTarget::Curve {
+                curve: "perf".into(),
+                sensor: Some(TempSensorRef::Hwmon {
+                    hwmon: "amdgpu".into(),
+                    label: None,
+                }),
+            },
+        };
+        assert_eq!(
+            format_cooling_rule(&cooling_hwmon_nolabel),
+            "smart/fan3 -> curva 'perf' (sensor hwmon:amdgpu)"
+        );
+
+        let curve = FanCurve {
+            points: vec![
+                CurvePoint { temp_c: 30.0, duty: 40 },
+                CurvePoint { temp_c: 50.0, duty: 100 },
+            ],
+        };
+        assert!(format_curve_summary("quiet", &curve).contains("30°C -> 40%, 50°C -> 100%"));
+
+        let report = ApplyReport {
+            lighting_applied: 2,
+            cooling_applied: 3,
+            warnings: vec![],
+        };
+        assert_eq!(
+            format_apply_report("default", &report),
+            "Perfil 'default' aplicado: 2 iluminación, 3 refrigeración"
+        );
+    }
 }

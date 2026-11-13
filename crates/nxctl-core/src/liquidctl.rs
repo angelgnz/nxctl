@@ -44,6 +44,9 @@ pub trait LiquidctlBackend: Send + Sync {
 
     /// Sets fixed fan/pump duty percentage (`0..=100`) on devices matching `match_device`.
     fn set_speed(&self, match_device: &str, channel: &str, duty: u8, dry_run: bool) -> Result<()>;
+
+    /// Initializes devices (all devices when `match_device` is `None`).
+    fn initialize(&self, match_device: Option<&str>, dry_run: bool) -> Result<()>;
 }
 
 /// Backend that invokes the `liquidctl` CLI binary.
@@ -163,6 +166,23 @@ impl LiquidctlBackend for CliLiquidctlBackend {
         self.execute(args)?;
         Ok(())
     }
+
+    fn initialize(&self, match_device: Option<&str>, dry_run: bool) -> Result<()> {
+        let mut args = Vec::new();
+        if let Some(pattern) = match_device {
+            args.push("--match".to_string());
+            args.push(pattern.to_string());
+        }
+        args.push("initialize".to_string());
+
+        if dry_run {
+            tracing::info!(binary = %self.binary, ?args, "dry-run: liquidctl initialize");
+            return Ok(());
+        }
+
+        self.execute(args)?;
+        Ok(())
+    }
 }
 
 /// Recorded invocation on [`MockLiquidctlBackend`].
@@ -182,6 +202,10 @@ pub enum MockCall {
         match_device: String,
         channel: String,
         duty: u8,
+        dry_run: bool,
+    },
+    Initialize {
+        match_device: Option<String>,
         dry_run: bool,
     },
 }
@@ -214,7 +238,10 @@ impl MockLiquidctlBackend {
 
     /// Returns a snapshot of all calls recorded so far.
     pub fn calls(&self) -> Vec<MockCall> {
-        self.calls.lock().expect("mock calls mutex poisoned").clone()
+        self.calls
+            .lock()
+            .expect("mock calls mutex poisoned")
+            .clone()
     }
 
     /// Clears all recorded calls.
@@ -288,6 +315,17 @@ impl LiquidctlBackend for MockLiquidctlBackend {
             });
         Ok(())
     }
+
+    fn initialize(&self, match_device: Option<&str>, dry_run: bool) -> Result<()> {
+        self.calls
+            .lock()
+            .expect("mock calls mutex poisoned")
+            .push(MockCall::Initialize {
+                match_device: match_device.map(str::to_string),
+                dry_run,
+            });
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -322,7 +360,10 @@ mod tests {
     #[test]
     fn cli_backend_returns_not_found_and_supports_dry_run() {
         let cli = CliLiquidctlBackend::with_binary("definitely-missing-liquidctl-bin-xyz");
-        assert!(matches!(cli.status(None), Err(CoreError::LiquidctlNotFound)));
+        assert!(matches!(
+            cli.status(None),
+            Err(CoreError::LiquidctlNotFound)
+        ));
         assert!(matches!(
             cli.set_speed("kraken", "pump", 80, false),
             Err(CoreError::LiquidctlNotFound)
@@ -338,9 +379,7 @@ mod tests {
     #[test]
     fn cli_backend_returns_failed_on_nonzero_exit() {
         let cli = CliLiquidctlBackend::with_binary("false");
-        let err = cli
-            .status(Some("kraken"))
-            .expect_err("false should fail");
+        let err = cli.status(Some("kraken")).expect_err("false should fail");
         assert!(matches!(
             err,
             CoreError::LiquidctlFailed {
@@ -380,6 +419,7 @@ mod tests {
             .expect("set_color");
         mock.set_speed("kraken", "pump", 100, true)
             .expect("set_speed");
+        mock.initialize(Some("kraken"), false).expect("initialize");
 
         let calls = mock.calls();
         assert_eq!(
@@ -401,7 +441,19 @@ mod tests {
                     duty: 100,
                     dry_run: true,
                 },
+                MockCall::Initialize {
+                    match_device: Some("kraken".into()),
+                    dry_run: false,
+                },
             ]
         );
+    }
+
+    #[test]
+    fn cli_backend_initialize_supports_dry_run() {
+        let backend = CliLiquidctlBackend::with_binary("nonexistent-liquidctl-binary");
+        backend
+            .initialize(None, true)
+            .expect("dry-run initialize should not spawn binary");
     }
 }

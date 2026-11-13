@@ -8,7 +8,7 @@ use clap::Parser;
 use nxctl_core::config::Config;
 use nxctl_core::curve::HysteresisController;
 use nxctl_core::engine::{apply_profile, step_daemon_tick};
-use nxctl_core::liquidctl::CliLiquidctlBackend;
+use nxctl_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
 
 #[derive(Parser)]
 #[command(name = "nxctld", version, about = "Daemon de control térmico/iluminación NZXT")]
@@ -18,6 +18,9 @@ struct Cli {
     /// Perfil a usar (por defecto config.default_profile)
     #[arg(long)]
     profile: Option<String>,
+    /// Inicializa los dispositivos con `liquidctl initialize` antes de aplicar el perfil
+    #[arg(long)]
+    init_devices: bool,
     /// Ejecuta un solo tick y sale
     #[arg(long)]
     once: bool,
@@ -56,6 +59,13 @@ fn main() -> Result<()> {
             .context("instalando manejador de señales")?;
     }
 
+    if cli.init_devices {
+        backend
+            .initialize(None, cli.dry_run)
+            .context("inicializando dispositivos vía liquidctl")?;
+        tracing::info!("dispositivos inicializados");
+    }
+
     let report = apply_profile(&backend, &config, &profile, cli.dry_run)
         .with_context(|| format!("aplicando perfil inicial '{profile}'"))?;
     tracing::info!(?report, "perfil '{profile}' aplicado");
@@ -80,4 +90,38 @@ fn main() -> Result<()> {
     }
     tracing::info!("nxctld detenido");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_parses_init_devices_and_runtime_flags() {
+        let cli = Cli::try_parse_from([
+            "nxctld",
+            "--init-devices",
+            "--once",
+            "--dry-run",
+            "--profile",
+            "gaming",
+            "-vv",
+        ])
+        .unwrap();
+
+        assert!(cli.init_devices);
+        assert!(cli.once);
+        assert!(cli.dry_run);
+        assert_eq!(cli.profile.as_deref(), Some("gaming"));
+        assert_eq!(cli.verbose, 2);
+    }
+
+    #[test]
+    fn cli_defaults_have_init_devices_disabled() {
+        let cli = Cli::try_parse_from(["nxctld"]).unwrap();
+        assert!(!cli.init_devices);
+        assert!(!cli.once);
+        assert!(!cli.dry_run);
+        assert_eq!(cli.verbose, 0);
+    }
 }

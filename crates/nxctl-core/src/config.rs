@@ -58,11 +58,19 @@ impl Default for DaemonConfig {
     }
 }
 
-/// Reference to a temperature sensor reading reported by liquidctl.
+/// Reference to a temperature sensor: a liquidctl status reading or a Linux hwmon sensor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TempSensorRef {
-    pub match_device: String,
-    pub key: String,
+#[serde(untagged)]
+pub enum TempSensorRef {
+    Liquidctl {
+        match_device: String,
+        key: String,
+    },
+    Hwmon {
+        hwmon: String,
+        #[serde(default)]
+        label: Option<String>,
+    },
 }
 
 /// A single `(temperature_celsius, duty_percent)` point on a fan curve.
@@ -379,7 +387,7 @@ impl Config {
         Self {
             default_profile: "default".to_string(),
             daemon: DaemonConfig {
-                temp_sensor: Some(TempSensorRef {
+                temp_sensor: Some(TempSensorRef::Liquidctl {
                     match_device: "kraken".to_string(),
                     key: "Liquid temperature".to_string(),
                 }),
@@ -392,24 +400,45 @@ impl Config {
 }
 
 fn curve_cooling_rules(curve_name: &str) -> Vec<CoolingRule> {
-    [("kraken", "pump"), ("smart", "fan1"), ("smart", "fan2"), ("smart", "fan3")]
-        .into_iter()
-        .map(|(device, channel)| CoolingRule {
-            match_device: device.to_string(),
-            channel: channel.to_string(),
-            target: CoolingTarget::Curve {
-                curve: curve_name.to_string(),
-                sensor: None,
-            },
-        })
-        .collect()
+    [
+        ("kraken", "pump"),
+        ("smart", "fan1"),
+        ("smart", "fan2"),
+        ("smart", "fan3"),
+    ]
+    .into_iter()
+    .map(|(device, channel)| CoolingRule {
+        match_device: device.to_string(),
+        channel: channel.to_string(),
+        target: CoolingTarget::Curve {
+            curve: curve_name.to_string(),
+            sensor: None,
+        },
+    })
+    .collect()
 }
 
 fn validate_sensor_ref(sensor: &TempSensorRef, context: &str) -> Result<()> {
-    if sensor.match_device.trim().is_empty() || sensor.key.trim().is_empty() {
-        return Err(CoreError::Validation(format!(
-            "{context} must have non-empty match_device and key"
-        )));
+    match sensor {
+        TempSensorRef::Liquidctl { match_device, key } => {
+            if match_device.trim().is_empty() || key.trim().is_empty() {
+                return Err(CoreError::Validation(format!(
+                    "{context} must have non-empty match_device and key"
+                )));
+            }
+        }
+        TempSensorRef::Hwmon { hwmon, label } => {
+            if hwmon.trim().is_empty() {
+                return Err(CoreError::Validation(format!(
+                    "{context} must have a non-empty hwmon"
+                )));
+            }
+            if label.as_deref().is_some_and(|l| l.trim().is_empty()) {
+                return Err(CoreError::Validation(format!(
+                    "{context} hwmon label must not be empty"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -480,7 +509,10 @@ mod tests {
             CoolingTarget::Curve { curve, .. } if curve == "quiet"
         )));
 
-        let performance = cfg.profiles.get("performance").expect("performance profile");
+        let performance = cfg
+            .profiles
+            .get("performance")
+            .expect("performance profile");
         assert!(performance.cooling.iter().all(|r| matches!(
             &r.target,
             CoolingTarget::Curve { curve, .. } if curve == "aggressive"
@@ -564,5 +596,40 @@ cooling = []
     fn default_path_ends_with_nxctl_config_toml() {
         let path = Config::default_path().expect("default path");
         assert!(path.ends_with(Path::new("nxctl").join("config.toml")));
+    }
+
+    #[test]
+    fn temp_sensor_ref_toml_liquidctl_and_hwmon() {
+        let liq: TempSensorRef =
+            toml::from_str("match_device = \"kraken\"\nkey = \"Liquid temperature\"").unwrap();
+        assert_eq!(
+            liq,
+            TempSensorRef::Liquidctl {
+                match_device: "kraken".into(),
+                key: "Liquid temperature".into()
+            }
+        );
+        let hw: TempSensorRef = toml::from_str("hwmon = \"k10temp\"\nlabel = \"Tctl\"").unwrap();
+        assert_eq!(
+            hw,
+            TempSensorRef::Hwmon {
+                hwmon: "k10temp".into(),
+                label: Some("Tctl".into())
+            }
+        );
+        let hw2: TempSensorRef = toml::from_str("hwmon = \"amdgpu\"").unwrap();
+        assert_eq!(
+            hw2,
+            TempSensorRef::Hwmon {
+                hwmon: "amdgpu".into(),
+                label: None
+            }
+        );
+        assert!(validate_sensor_ref(&hw, "t").is_ok());
+        let bad = TempSensorRef::Hwmon {
+            hwmon: " ".into(),
+            label: None,
+        };
+        assert!(validate_sensor_ref(&bad, "t").is_err());
     }
 }
