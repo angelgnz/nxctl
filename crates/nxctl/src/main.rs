@@ -7,10 +7,17 @@ use nxctl_core::config::{
 };
 use nxctl_core::engine::{ApplyReport, apply_profile};
 use nxctl_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
-use nxctl_core::list_hwmon_sensors;
+use nxctl_core::{
+    IpcRequest, IpcResponse, default_socket_path, list_hwmon_sensors, list_nvidia_gpus,
+    send_request,
+};
 
 #[derive(Parser)]
-#[command(name = "nxctl", version, about = "Control de dispositivos NZXT vía liquidctl")]
+#[command(
+    name = "nxctl",
+    version,
+    about = "Control de dispositivos NZXT vía liquidctl"
+)]
 struct Cli {
     /// Ruta del archivo de configuración
     #[arg(long, global = true)]
@@ -62,6 +69,9 @@ enum Command {
     /// Inspección de curvas de ventilación
     #[command(subcommand)]
     Curves(CurvesCmd),
+    /// Control del daemon nxctld en ejecución
+    #[command(subcommand)]
+    Daemon(DaemonCmd),
 }
 
 #[derive(Subcommand)]
@@ -96,9 +106,34 @@ enum CurvesCmd {
     Show { name: String },
 }
 
+#[derive(Subcommand)]
+enum DaemonCmd {
+    /// Muestra el estado actual del daemon
+    Status {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Recarga la configuración del daemon
+    Reload {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Cambia el perfil activo del daemon
+    Profile {
+        name: String,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+}
+
 fn format_lighting_rule(rule: &LightingRule) -> String {
     if rule.colors.is_empty() {
-        format!("{}/{} -> modo {}", rule.match_device, rule.channel, rule.mode)
+        format!(
+            "{}/{} -> modo {}",
+            rule.match_device, rule.channel, rule.mode
+        )
     } else {
         format!(
             "{}/{} -> modo {} [{}]",
@@ -129,6 +164,14 @@ fn format_cooling_rule(rule: &CoolingRule) -> String {
             ),
             Some(TempSensorRef::Hwmon { hwmon, label: None }) => format!(
                 "{}/{} -> curva '{curve}' (sensor hwmon:{hwmon})",
+                rule.match_device, rule.channel
+            ),
+            Some(TempSensorRef::Nvidia { gpu: Some(idx), .. }) => format!(
+                "{}/{} -> curva '{curve}' (sensor nvidia:gpu{idx})",
+                rule.match_device, rule.channel
+            ),
+            Some(TempSensorRef::Nvidia { gpu: None, .. }) => format!(
+                "{}/{} -> curva '{curve}' (sensor nvidia)",
                 rule.match_device, rule.channel
             ),
             None => format!("{}/{} -> curva '{curve}'", rule.match_device, rule.channel),
@@ -180,7 +223,10 @@ fn main() -> Result<()> {
                 None => Config::default_path()?,
             };
             if path.exists() && !force {
-                bail!("{} ya existe; usa --force para sobrescribir", path.display());
+                bail!(
+                    "{} ya existe; usa --force para sobrescribir",
+                    path.display()
+                );
             }
             let saved = Config::starter_nzxt().save(Some(&path))?;
             println!("Configuración creada en {}", saved.display());
@@ -213,23 +259,45 @@ fn main() -> Result<()> {
                             serde_json::Value::String(s) => s.clone(),
                             v => v.to_string(),
                         };
-                        println!("  {:<28} {} {}", r.key, value, r.unit.as_deref().unwrap_or(""));
+                        println!(
+                            "  {:<28} {} {}",
+                            r.key,
+                            value,
+                            r.unit.as_deref().unwrap_or("")
+                        );
                     }
                 }
             }
         }
         Command::Sensors { json } => {
             let sensors = list_hwmon_sensors().context("listando sensores hwmon")?;
+            let nvidia_gpus = list_nvidia_gpus().context("listando sensores nvidia")?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&sensors)?);
-            } else if sensors.is_empty() {
-                println!("No se encontraron sensores hwmon.");
+                let payload = serde_json::json!({
+                    "hwmon": sensors,
+                    "nvidia": nvidia_gpus,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else if sensors.is_empty() && nvidia_gpus.is_empty() {
+                println!("No se encontraron sensores de temperatura.");
             } else {
-                println!("{:<10} {:<16} {:<24} {:>8}", "DEVICE", "NAME", "LABEL", "TEMP");
+                println!(
+                    "{:<10} {:<16} {:<24} {:>8}",
+                    "DEVICE", "NAME", "LABEL", "TEMP"
+                );
                 for s in &sensors {
                     let label = s.label.as_deref().unwrap_or(&s.input_file);
                     let temp = format!("{:.1} °C", s.temp_c);
-                    println!("{:<10} {:<16} {:<24} {:>8}", s.device_dir, s.name, label, temp);
+                    println!(
+                        "{:<10} {:<16} {:<24} {:>8}",
+                        s.device_dir, s.name, label, temp
+                    );
+                }
+                for gpu in &nvidia_gpus {
+                    let device = format!("nvidia{}", gpu.index);
+                    let name = format!("GPU {}", gpu.index);
+                    let temp = format!("{:.1} °C", gpu.temp_c);
+                    println!("{:<10} {:<16} {:<24} {:>8}", device, name, gpu.name, temp);
                 }
             }
         }
@@ -242,12 +310,41 @@ fn main() -> Result<()> {
             for warning in &report.warnings {
                 eprintln!("Aviso: {warning}");
             }
+            let sock = default_socket_path();
+            if !cli.dry_run && sock.exists() {
+                match send_request(
+                    &sock,
+                    &IpcRequest::SetProfile {
+                        profile: name.clone(),
+                    },
+                ) {
+                    Ok(IpcResponse::Ok { .. }) => {
+                        println!("Daemon sincronizado con perfil '{name}'");
+                    }
+                    Ok(IpcResponse::Error { message }) => {
+                        eprintln!("Aviso: no se pudo sincronizar el daemon: {message}");
+                    }
+                    Ok(IpcResponse::Status { .. }) => {}
+                    Err(e) => {
+                        eprintln!("Aviso: no se pudo sincronizar el daemon: {e}");
+                    }
+                }
+            }
         }
-        Command::Set(SetCmd::Color { match_, channel, mode, colors }) => {
+        Command::Set(SetCmd::Color {
+            match_,
+            channel,
+            mode,
+            colors,
+        }) => {
             backend.set_color(&match_, &channel, &mode, &colors, cli.dry_run)?;
             println!("Color aplicado a {match_}/{channel}");
         }
-        Command::Set(SetCmd::Speed { match_, channel, duty }) => {
+        Command::Set(SetCmd::Speed {
+            match_,
+            channel,
+            duty,
+        }) => {
             if duty > 100 {
                 bail!("duty debe estar entre 0 y 100");
             }
@@ -257,8 +354,15 @@ fn main() -> Result<()> {
         Command::Profiles(ProfilesCmd::List) => {
             let config = Config::load(cfg_path)?;
             for (name, p) in &config.profiles {
-                let marker = if *name == config.default_profile { "*" } else { " " };
-                println!("{marker} {name:<16} {}", p.description.as_deref().unwrap_or(""));
+                let marker = if *name == config.default_profile {
+                    "*"
+                } else {
+                    " "
+                };
+                println!(
+                    "{marker} {name:<16} {}",
+                    p.description.as_deref().unwrap_or("")
+                );
             }
         }
         Command::Profiles(ProfilesCmd::Show { name }) => {
@@ -309,6 +413,51 @@ fn main() -> Result<()> {
                 println!("  {:>5.1}°C -> {:>3}%", p.temp_c, p.duty);
             }
         }
+        Command::Daemon(cmd) => match cmd {
+            DaemonCmd::Status { socket, json } => {
+                let sock = socket.unwrap_or_else(default_socket_path);
+                let resp = send_request(&sock, &IpcRequest::Status)
+                    .with_context(|| format!("conectando con nxctld en {}", sock.display()))?;
+                match resp {
+                    IpcResponse::Status { daemon } => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&daemon)?);
+                        } else {
+                            println!("Perfil activo:      {}", daemon.active_profile);
+                            println!(
+                                "Configuración:      {}",
+                                daemon.config_path.as_deref().unwrap_or("(por defecto)")
+                            );
+                            println!("Intervalo de sondeo: {}s", daemon.poll_interval_secs);
+                            println!("Histéresis:         {:.1} °C", daemon.hysteresis_celsius);
+                            println!("Delta mínimo duty:  {}%", daemon.min_duty_delta);
+                        }
+                    }
+                    IpcResponse::Error { message } => bail!("{message}"),
+                    IpcResponse::Ok { message } => println!("{message}"),
+                }
+            }
+            DaemonCmd::Reload { socket } => {
+                let sock = socket.unwrap_or_else(default_socket_path);
+                let resp = send_request(&sock, &IpcRequest::Reload)
+                    .with_context(|| format!("conectando con nxctld en {}", sock.display()))?;
+                match resp {
+                    IpcResponse::Ok { message } => println!("{message}"),
+                    IpcResponse::Error { message } => bail!("{message}"),
+                    IpcResponse::Status { .. } => println!("Configuración recargada"),
+                }
+            }
+            DaemonCmd::Profile { name, socket } => {
+                let sock = socket.unwrap_or_else(default_socket_path);
+                let resp = send_request(&sock, &IpcRequest::SetProfile { profile: name })
+                    .with_context(|| format!("conectando con nxctld en {}", sock.display()))?;
+                match resp {
+                    IpcResponse::Ok { message } => println!("{message}"),
+                    IpcResponse::Error { message } => bail!("{message}"),
+                    IpcResponse::Status { .. } => println!("Perfil actualizado"),
+                }
+            }
+        },
     }
     Ok(())
 }
@@ -324,15 +473,17 @@ mod tests {
         assert!(validate.dry_run);
         assert!(matches!(validate.command, Command::Validate));
 
-        let init_dev =
-            Cli::try_parse_from(["nxctl", "init-devices", "--match", "kraken"]).unwrap();
+        let init_dev = Cli::try_parse_from(["nxctl", "init-devices", "--match", "kraken"]).unwrap();
         assert!(matches!(
             init_dev.command,
             Command::InitDevices { match_: Some(ref m) } if m == "kraken"
         ));
 
         let curves_list = Cli::try_parse_from(["nxctl", "curves", "list"]).unwrap();
-        assert!(matches!(curves_list.command, Command::Curves(CurvesCmd::List)));
+        assert!(matches!(
+            curves_list.command,
+            Command::Curves(CurvesCmd::List)
+        ));
 
         let curves_show = Cli::try_parse_from(["nxctl", "curves", "show", "silent"]).unwrap();
         assert!(matches!(
@@ -341,10 +492,53 @@ mod tests {
         ));
 
         let sensors_json = Cli::try_parse_from(["nxctl", "sensors", "--json"]).unwrap();
-        assert!(matches!(sensors_json.command, Command::Sensors { json: true }));
+        assert!(matches!(
+            sensors_json.command,
+            Command::Sensors { json: true }
+        ));
 
         let sensors = Cli::try_parse_from(["nxctl", "sensors"]).unwrap();
         assert!(matches!(sensors.command, Command::Sensors { json: false }));
+
+        let daemon_status = Cli::try_parse_from([
+            "nxctl",
+            "daemon",
+            "status",
+            "--socket",
+            "/tmp/test.sock",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            daemon_status.command,
+            Command::Daemon(DaemonCmd::Status {
+                socket: Some(ref p),
+                json: true
+            }) if p == std::path::Path::new("/tmp/test.sock")
+        ));
+
+        let daemon_reload = Cli::try_parse_from(["nxctl", "daemon", "reload"]).unwrap();
+        assert!(matches!(
+            daemon_reload.command,
+            Command::Daemon(DaemonCmd::Reload { socket: None })
+        ));
+
+        let daemon_profile = Cli::try_parse_from([
+            "nxctl",
+            "daemon",
+            "profile",
+            "performance",
+            "--socket",
+            "/tmp/test.sock",
+        ])
+        .unwrap();
+        assert!(matches!(
+            daemon_profile.command,
+            Command::Daemon(DaemonCmd::Profile {
+                ref name,
+                socket: Some(ref p)
+            }) if name == "performance" && p == std::path::Path::new("/tmp/test.sock")
+        ));
     }
 
     #[test]
@@ -365,7 +559,10 @@ mod tests {
             channel: "pump".into(),
             target: CoolingTarget::Fixed { duty: 75 },
         };
-        assert_eq!(format_cooling_rule(&cooling_fixed), "kraken/pump -> fijo 75%");
+        assert_eq!(
+            format_cooling_rule(&cooling_fixed),
+            "kraken/pump -> fijo 75%"
+        );
 
         let cooling_curve = CoolingRule {
             match_device: "smart".into(),
@@ -415,10 +612,48 @@ mod tests {
             "smart/fan3 -> curva 'perf' (sensor hwmon:amdgpu)"
         );
 
+        let cooling_nvidia = CoolingRule {
+            match_device: "smart".into(),
+            channel: "fan4".into(),
+            target: CoolingTarget::Curve {
+                curve: "perf".into(),
+                sensor: Some(TempSensorRef::Nvidia {
+                    nvidia: true,
+                    gpu: Some(0),
+                }),
+            },
+        };
+        assert_eq!(
+            format_cooling_rule(&cooling_nvidia),
+            "smart/fan4 -> curva 'perf' (sensor nvidia:gpu0)"
+        );
+
+        let cooling_nvidia_default = CoolingRule {
+            match_device: "smart".into(),
+            channel: "fan5".into(),
+            target: CoolingTarget::Curve {
+                curve: "perf".into(),
+                sensor: Some(TempSensorRef::Nvidia {
+                    nvidia: true,
+                    gpu: None,
+                }),
+            },
+        };
+        assert_eq!(
+            format_cooling_rule(&cooling_nvidia_default),
+            "smart/fan5 -> curva 'perf' (sensor nvidia)"
+        );
+
         let curve = FanCurve {
             points: vec![
-                CurvePoint { temp_c: 30.0, duty: 40 },
-                CurvePoint { temp_c: 50.0, duty: 100 },
+                CurvePoint {
+                    temp_c: 30.0,
+                    duty: 40,
+                },
+                CurvePoint {
+                    temp_c: 50.0,
+                    duty: 100,
+                },
             ],
         };
         assert!(format_curve_summary("quiet", &curve).contains("30°C -> 40%, 50°C -> 100%"));

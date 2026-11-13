@@ -12,6 +12,7 @@ path = "src/main.rs"
 nxctl-core = { path = "../nxctl-core" }
 anyhow.workspace = true
 clap.workspace = true
-ctrlc = { workspace = true, features = ["termination"] }
+serde_json.workspace = true
+signal-hook.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

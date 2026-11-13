@@ -3,7 +3,9 @@ pub mod curve;
 pub mod engine;
 pub mod error;
 pub mod hwmon;
+pub mod ipc;
 pub mod liquidctl;
+pub mod nvidia;
 
 pub use config::{
     Config, CoolingRule, CoolingTarget, CurvePoint, DaemonConfig, FanCurve, LightingRule, Profile,
@@ -13,7 +15,9 @@ pub use curve::{HysteresisController, evaluate_curve};
 pub use engine::{ApplyReport, SpeedChange, apply_profile, step_daemon_tick};
 pub use error::{CoreError, Result};
 pub use hwmon::{HwmonSensorInfo, list_hwmon_sensors, read_hwmon_temp};
+pub use ipc::{DaemonStatus, IpcRequest, IpcResponse, default_socket_path, send_request};
 pub use liquidctl::{
     CliLiquidctlBackend, DeviceStatus, LiquidctlBackend, MockCall, MockLiquidctlBackend,
     StatusReading,
 };
+pub use nvidia::{NvidiaGpuInfo, list_nvidia_gpus, read_nvidia_temp};

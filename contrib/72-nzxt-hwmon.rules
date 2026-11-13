@@ -1,0 +1,5 @@
+# Allow rootless control of NZXT hwmon PWM attributes (nzxt_kraken3, nzxt_kraken2, nzxt-smart2, etc.)
+# Install:
+#   sudo cp contrib/72-nzxt-hwmon.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger -s hwmon
+ACTION=="add|change", SUBSYSTEM=="hwmon", ATTRS{idVendor}=="1e71", RUN+="/bin/sh -c 'chmod 0666 /sys$devpath/pwm* 2>/dev/null || true'"

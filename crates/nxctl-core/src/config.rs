@@ -71,6 +71,11 @@ pub enum TempSensorRef {
         #[serde(default)]
         label: Option<String>,
     },
+    Nvidia {
+        nvidia: bool,
+        #[serde(default)]
+        gpu: Option<u32>,
+    },
 }
 
 /// A single `(temperature_celsius, duty_percent)` point on a fan curve.
@@ -439,6 +444,13 @@ fn validate_sensor_ref(sensor: &TempSensorRef, context: &str) -> Result<()> {
                 )));
             }
         }
+        TempSensorRef::Nvidia { nvidia, .. } => {
+            if !nvidia {
+                return Err(CoreError::Validation(format!(
+                    "{context} nvidia must be true"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -629,6 +641,36 @@ cooling = []
         let bad = TempSensorRef::Hwmon {
             hwmon: " ".into(),
             label: None,
+        };
+        assert!(validate_sensor_ref(&bad, "t").is_err());
+    }
+
+    #[test]
+    fn temp_sensor_ref_nvidia_roundtrip_and_validation() {
+        let with: TempSensorRef = toml::from_str("nvidia = true\ngpu = 1").unwrap();
+        assert_eq!(
+            with,
+            TempSensorRef::Nvidia {
+                nvidia: true,
+                gpu: Some(1)
+            }
+        );
+        let without: TempSensorRef = toml::from_str("nvidia = true").unwrap();
+        assert_eq!(
+            without,
+            TempSensorRef::Nvidia {
+                nvidia: true,
+                gpu: None
+            }
+        );
+        for r in [&with, &without] {
+            let back: TempSensorRef = toml::from_str(&toml::to_string(r).unwrap()).unwrap();
+            assert_eq!(&back, r);
+            assert!(validate_sensor_ref(r, "t").is_ok());
+        }
+        let bad = TempSensorRef::Nvidia {
+            nvidia: false,
+            gpu: None,
         };
         assert!(validate_sensor_ref(&bad, "t").is_err());
     }

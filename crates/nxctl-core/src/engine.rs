@@ -159,6 +159,9 @@ fn read_sensor_temp(
         TempSensorRef::Hwmon { hwmon, label } => {
             return Ok(crate::hwmon::read_hwmon_temp(hwmon, label.as_deref()));
         }
+        TempSensorRef::Nvidia { gpu, .. } => {
+            return Ok(crate::nvidia::read_nvidia_temp(*gpu));
+        }
         TempSensorRef::Liquidctl { match_device, key } => (match_device, key),
     };
     if !cache.contains_key(match_device) {
