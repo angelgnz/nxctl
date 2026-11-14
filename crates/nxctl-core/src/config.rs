@@ -22,6 +22,10 @@ fn default_min_duty_delta() -> u8 {
     DEFAULT_MIN_DUTY_DELTA
 }
 
+fn default_reapply_on_resume() -> bool {
+    true
+}
+
 /// Top-level nxctl configuration stored as TOML.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -45,6 +49,10 @@ pub struct DaemonConfig {
     pub min_duty_delta: u8,
     #[serde(default)]
     pub temp_sensor: Option<TempSensorRef>,
+    #[serde(default = "default_reapply_on_resume")]
+    pub reapply_on_resume: bool,
+    #[serde(default)]
+    pub init_on_resume: bool,
 }
 
 impl Default for DaemonConfig {
@@ -54,6 +62,8 @@ impl Default for DaemonConfig {
             hysteresis_celsius: DEFAULT_HYSTERESIS_CELSIUS,
             min_duty_delta: DEFAULT_MIN_DUTY_DELTA,
             temp_sensor: None,
+            reapply_on_resume: true,
+            init_on_resume: false,
         }
     }
 }
@@ -479,6 +489,8 @@ mod tests {
         assert_eq!(daemon.hysteresis_celsius, 2.0);
         assert_eq!(daemon.min_duty_delta, 2);
         assert_eq!(daemon.temp_sensor, None);
+        assert!(daemon.reapply_on_resume);
+        assert!(!daemon.init_on_resume);
     }
 
     #[test]
@@ -565,6 +577,8 @@ cooling = []
         assert_eq!(cfg.daemon.poll_interval_secs, 5);
         assert_eq!(cfg.daemon.hysteresis_celsius, 2.0);
         assert_eq!(cfg.daemon.min_duty_delta, 2);
+        assert!(cfg.daemon.reapply_on_resume);
+        assert!(!cfg.daemon.init_on_resume);
     }
 
     #[test]

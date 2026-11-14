@@ -6,6 +6,7 @@ pub mod hwmon;
 pub mod ipc;
 pub mod liquidctl;
 pub mod nvidia;
+pub mod resume;
 
 pub use config::{
     Config, CoolingRule, CoolingTarget, CurvePoint, DaemonConfig, FanCurve, LightingRule, Profile,
@@ -21,3 +22,4 @@ pub use liquidctl::{
     StatusReading,
 };
 pub use nvidia::{NvidiaGpuInfo, list_nvidia_gpus, read_nvidia_temp};
+pub use resume::{DEFAULT_RESUME_THRESHOLD_SECS, ResumeDetector, detect_resume_gap};

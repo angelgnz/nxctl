@@ -120,6 +120,11 @@ enum DaemonCmd {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    /// Reaplica el perfil activo del daemon (útil tras suspensión)
+    Reapply {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// Cambia el perfil activo del daemon
     Profile {
         name: String,
@@ -447,6 +452,16 @@ fn main() -> Result<()> {
                     IpcResponse::Status { .. } => println!("Configuración recargada"),
                 }
             }
+            DaemonCmd::Reapply { socket } => {
+                let sock = socket.unwrap_or_else(default_socket_path);
+                let resp = send_request(&sock, &IpcRequest::Reapply)
+                    .with_context(|| format!("conectando con nxctld en {}", sock.display()))?;
+                match resp {
+                    IpcResponse::Ok { message } => println!("{message}"),
+                    IpcResponse::Error { message } => bail!("{message}"),
+                    IpcResponse::Status { .. } => println!("Perfil reaplicado"),
+                }
+            }
             DaemonCmd::Profile { name, socket } => {
                 let sock = socket.unwrap_or_else(default_socket_path);
                 let resp = send_request(&sock, &IpcRequest::SetProfile { profile: name })
@@ -521,6 +536,21 @@ mod tests {
         assert!(matches!(
             daemon_reload.command,
             Command::Daemon(DaemonCmd::Reload { socket: None })
+        ));
+
+        let daemon_reapply = Cli::try_parse_from(["nxctl", "daemon", "reapply"]).unwrap();
+        assert!(matches!(
+            daemon_reapply.command,
+            Command::Daemon(DaemonCmd::Reapply { socket: None })
+        ));
+
+        let daemon_reapply_sock =
+            Cli::try_parse_from(["nxctl", "daemon", "reapply", "--socket", "/tmp/test.sock"])
+                .unwrap();
+        assert!(matches!(
+            daemon_reapply_sock.command,
+            Command::Daemon(DaemonCmd::Reapply { socket: Some(ref p) })
+                if p == std::path::Path::new("/tmp/test.sock")
         ));
 
         let daemon_profile = Cli::try_parse_from([

@@ -10,10 +10,10 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use nxctl_core::config::Config;
 use nxctl_core::curve::HysteresisController;
-use nxctl_core::engine::{apply_profile, step_daemon_tick};
+use nxctl_core::engine::{ApplyReport, apply_profile, step_daemon_tick};
 use nxctl_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
-use nxctl_core::{DaemonStatus, IpcRequest, IpcResponse, default_socket_path};
-use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+use nxctl_core::{DaemonStatus, IpcRequest, IpcResponse, ResumeDetector, default_socket_path};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
 
 const POLL_SLEEP_STEP: Duration = Duration::from_millis(100);
 const IPC_IO_TIMEOUT: Duration = Duration::from_secs(3);
@@ -36,6 +36,9 @@ struct Cli {
     /// Inicializa los dispositivos con `liquidctl initialize` antes de aplicar el perfil
     #[arg(long)]
     init_devices: bool,
+    /// Re-inicializa los dispositivos con `liquidctl initialize` al reanudar tras suspensión
+    #[arg(long)]
+    init_on_resume: bool,
     /// Ejecuta un solo tick y sale
     #[arg(long)]
     once: bool,
@@ -54,6 +57,7 @@ struct DaemonState {
     controller: HysteresisController,
     interval: Duration,
     dry_run: bool,
+    cli_init_on_resume: bool,
 }
 
 impl DaemonState {
@@ -75,7 +79,38 @@ impl DaemonState {
             controller,
             interval,
             dry_run,
+            cli_init_on_resume: false,
         }
+    }
+
+    fn with_init_on_resume(mut self, init_on_resume: bool) -> Self {
+        self.cli_init_on_resume = init_on_resume;
+        self
+    }
+
+    fn should_init_on_resume(&self) -> bool {
+        self.cli_init_on_resume || self.config.daemon.init_on_resume
+    }
+
+    fn reapply(
+        &mut self,
+        backend: &dyn LiquidctlBackend,
+        init_devices: bool,
+    ) -> Result<ApplyReport> {
+        if init_devices {
+            backend
+                .initialize(None, self.dry_run)
+                .context("inicializando dispositivos vía liquidctl tras reanudación")?;
+            tracing::info!("dispositivos re-inicializados tras reanudación");
+        }
+        self.controller = HysteresisController::new(
+            self.config.daemon.hysteresis_celsius,
+            self.config.daemon.min_duty_delta,
+        );
+        let report = apply_profile(backend, &self.config, &self.active_profile, self.dry_run)
+            .with_context(|| format!("reaplicando perfil '{}'", self.active_profile))?;
+        tracing::info!(?report, "perfil '{}' reaplicado", self.active_profile);
+        Ok(report)
     }
 
     fn reload(&mut self, backend: &dyn LiquidctlBackend) -> Result<()> {
@@ -145,6 +180,20 @@ impl DaemonState {
                     message: e.to_string(),
                 },
             },
+            IpcRequest::Reapply => {
+                let init = self.should_init_on_resume();
+                match self.reapply(backend, init) {
+                    Ok(report) => IpcResponse::Ok {
+                        message: format!(
+                            "Perfil '{}' reaplicado ({} iluminación, {} refrigeración)",
+                            self.active_profile, report.lighting_applied, report.cooling_applied
+                        ),
+                    },
+                    Err(e) => IpcResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
             IpcRequest::SetProfile { profile } => match self.set_profile(backend, &profile) {
                 Ok(()) => IpcResponse::Ok {
                     message: format!("Perfil cambiado a '{profile}'"),
@@ -255,6 +304,8 @@ fn process_pending_events(
     state: &mut DaemonState,
     backend: &dyn LiquidctlBackend,
     reload_requested: &AtomicBool,
+    reapply_requested: &AtomicBool,
+    resume_detector: &mut ResumeDetector,
     ipc_rx: &mpsc::Receiver<IpcJob>,
 ) -> bool {
     let mut state_changed = false;
@@ -265,8 +316,31 @@ fn process_pending_events(
             state_changed = true;
         }
     }
+    if reapply_requested.swap(false, Ordering::SeqCst) {
+        let init = state.should_init_on_resume();
+        if let Err(e) = state.reapply(backend, init) {
+            tracing::warn!("error reaplicando perfil tras SIGUSR1: {e}");
+        } else {
+            state_changed = true;
+        }
+    }
+    if resume_detector.check() && state.config.daemon.reapply_on_resume {
+        tracing::info!(
+            "reanudación tras suspensión detectada; reaplicando perfil '{}'",
+            state.active_profile
+        );
+        let init = state.should_init_on_resume();
+        if let Err(e) = state.reapply(backend, init) {
+            tracing::warn!("error reaplicando perfil tras reanudación: {e}");
+        } else {
+            state_changed = true;
+        }
+    }
     while let Ok((req, resp_tx)) = ipc_rx.try_recv() {
-        let is_mutating = matches!(req, IpcRequest::Reload | IpcRequest::SetProfile { .. });
+        let is_mutating = matches!(
+            req,
+            IpcRequest::Reload | IpcRequest::Reapply | IpcRequest::SetProfile { .. }
+        );
         let resp = state.handle_ipc(backend, req);
         if is_mutating && matches!(resp, IpcResponse::Ok { .. }) {
             state_changed = true;
@@ -302,12 +376,15 @@ fn main() -> Result<()> {
 
     let stop_requested = Arc::new(AtomicBool::new(false));
     let reload_requested = Arc::new(AtomicBool::new(false));
+    let reapply_requested = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(SIGINT, Arc::clone(&stop_requested))
         .context("instalando manejador de SIGINT")?;
     signal_hook::flag::register(SIGTERM, Arc::clone(&stop_requested))
         .context("instalando manejador de SIGTERM")?;
     signal_hook::flag::register(SIGHUP, Arc::clone(&reload_requested))
         .context("instalando manejador de SIGHUP")?;
+    signal_hook::flag::register(SIGUSR1, Arc::clone(&reapply_requested))
+        .context("instalando manejador de SIGUSR1")?;
 
     let (ipc_tx, ipc_rx) = mpsc::channel();
     let ipc_handle = spawn_ipc_listener(socket_path.clone(), Arc::clone(&stop_requested), ipc_tx)?;
@@ -323,10 +400,19 @@ fn main() -> Result<()> {
         .with_context(|| format!("aplicando perfil inicial '{profile}'"))?;
     tracing::info!(?report, "perfil '{profile}' aplicado");
 
-    let mut state = DaemonState::new(config, cli.config, profile, cli.dry_run);
+    let mut state = DaemonState::new(config, cli.config, profile, cli.dry_run)
+        .with_init_on_resume(cli.init_on_resume);
+    let mut resume_detector = ResumeDetector::default();
 
     while !stop_requested.load(Ordering::SeqCst) {
-        process_pending_events(&mut state, &backend, &reload_requested, &ipc_rx);
+        process_pending_events(
+            &mut state,
+            &backend,
+            &reload_requested,
+            &reapply_requested,
+            &mut resume_detector,
+            &ipc_rx,
+        );
 
         match step_daemon_tick(
             &backend,
@@ -346,7 +432,14 @@ fn main() -> Result<()> {
         // Dormir en tramos cortos para responder rápido a señales e IPC.
         let mut left = state.interval;
         while !stop_requested.load(Ordering::SeqCst) && !left.is_zero() {
-            if process_pending_events(&mut state, &backend, &reload_requested, &ipc_rx) {
+            if process_pending_events(
+                &mut state,
+                &backend,
+                &reload_requested,
+                &reapply_requested,
+                &mut resume_detector,
+                &ipc_rx,
+            ) {
                 break;
             }
             let d = left.min(POLL_SLEEP_STEP);
@@ -398,10 +491,55 @@ mod tests {
     fn cli_defaults_have_init_devices_disabled() {
         let cli = Cli::try_parse_from(["nxctld"]).unwrap();
         assert!(!cli.init_devices);
+        assert!(!cli.init_on_resume);
         assert!(!cli.once);
         assert!(!cli.dry_run);
         assert!(cli.socket.is_none());
         assert_eq!(cli.verbose, 0);
+    }
+
+    #[test]
+    fn cli_parses_init_on_resume_flag() {
+        let cli = Cli::try_parse_from(["nxctld", "--init-on-resume"]).unwrap();
+        assert!(cli.init_on_resume);
+        assert!(!cli.init_devices);
+    }
+
+    #[test]
+    fn daemon_state_reapply_with_and_without_init() {
+        let cfg = Config::starter_nzxt();
+        let backend_no_init = MockLiquidctlBackend::new();
+        let mut state = DaemonState::new(cfg.clone(), None, "default".into(), false);
+
+        let report_no_init = state.reapply(&backend_no_init, false).unwrap();
+        assert!(report_no_init.lighting_applied + report_no_init.cooling_applied > 0);
+        let calls_no_init = backend_no_init.calls();
+        assert!(
+            !calls_no_init
+                .iter()
+                .any(|c| matches!(c, MockCall::Initialize { .. }))
+        );
+        assert!(
+            calls_no_init
+                .iter()
+                .any(|c| matches!(c, MockCall::SetColor { .. } | MockCall::SetSpeed { .. }))
+        );
+
+        let backend_with_init = MockLiquidctlBackend::new();
+        let mut state2 = DaemonState::new(cfg, None, "default".into(), false);
+        let report_with_init = state2.reapply(&backend_with_init, true).unwrap();
+        assert!(report_with_init.lighting_applied + report_with_init.cooling_applied > 0);
+        let calls_with_init = backend_with_init.calls();
+        assert!(
+            calls_with_init
+                .iter()
+                .any(|c| matches!(c, MockCall::Initialize { .. }))
+        );
+        assert!(
+            calls_with_init
+                .iter()
+                .any(|c| matches!(c, MockCall::SetColor { .. } | MockCall::SetSpeed { .. }))
+        );
     }
 
     #[test]

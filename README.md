@@ -31,6 +31,7 @@ nxctl curves list
 nxctl curves show <NOMBRE>
 nxctl daemon status [--socket RUTA] [--json]
 nxctl daemon reload [--socket RUTA]
+nxctl daemon reapply [--socket RUTA]
 nxctl daemon profile <NOMBRE> [--socket RUTA]
 ```
 
@@ -106,12 +107,26 @@ sudo systemctl enable --now nxctld
 sudo systemctl reload nxctld             # recarga config.toml vía SIGHUP
 ```
 
-También puedes recargar o cambiar de perfil en caliente vía IPC (socket Unix):
+También puedes recargar, reaplicar o cambiar de perfil en caliente vía IPC (socket Unix):
 
 ```sh
 nxctl daemon status
 nxctl daemon reload
+nxctl daemon reapply
 nxctl daemon profile performance
+```
+
+### Suspensión y reanudación (suspend/resume)
+
+Al reanudar desde suspensión o hibernación, `nxctld` detecta automáticamente el salto de reloj y reaplica el perfil activo (controlado por `daemon.reapply_on_resume = true` por defecto en `config.toml`). Si tus dispositivos USB necesitan re-inicializarse tras despertar, activa `daemon.init_on_resume = true` en `config.toml` o pasa `--init-on-resume` a `nxctld`.
+
+También puedes disparar la reaplicación manualmente o desde hooks de sistema:
+- Vía IPC: `nxctl daemon reapply [--socket RUTA]`
+- Vía señal `SIGUSR1`: `pkill -USR1 -x nxctld`
+- Hook de `systemd-sleep` (opcional, útil para reaplicación inmediata al despertar):
+
+```sh
+sudo install -m755 contrib/nxctl-sleep /usr/lib/systemd/system-sleep/nxctl-sleep
 ```
 
 Ajusta la ruta de `--config` en la unit de sistema según tu instalación.

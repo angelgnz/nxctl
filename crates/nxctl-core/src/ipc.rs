@@ -14,6 +14,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(3);
 pub enum IpcRequest {
     Status,
     Reload,
+    Reapply,
     SetProfile { profile: String },
 }
 
@@ -78,6 +79,7 @@ mod tests {
         for r in [
             IpcRequest::Status,
             IpcRequest::Reload,
+            IpcRequest::Reapply,
             IpcRequest::SetProfile {
                 profile: "x".into(),
             },
@@ -88,6 +90,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&IpcRequest::Status).unwrap(),
             r#"{"cmd":"status"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&IpcRequest::Reapply).unwrap(),
+            r#"{"cmd":"reapply"}"#
         );
     }
 

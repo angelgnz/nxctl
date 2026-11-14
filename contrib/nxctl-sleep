@@ -1,0 +1,9 @@
+#!/bin/sh
+# Systemd system-sleep hook: notify nxctld to reapply the active profile on wake.
+# Install to: /usr/lib/systemd/system-sleep/nxctl-sleep
+
+case "$1/$2" in
+    post/*)
+        pkill -USR1 -x nxctld || true
+        ;;
+esac
