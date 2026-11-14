@@ -33,6 +33,7 @@ nxctl daemon status [--socket RUTA] [--json]
 nxctl daemon reload [--socket RUTA]
 nxctl daemon reapply [--socket RUTA]
 nxctl daemon profile <NOMBRE> [--socket RUTA]
+nxctl tui [--socket RUTA] [--interval SEGS]
 ```
 
 Flags globales: `--config <RUTA>`, `--dry-run`, `-v/--verbose`.
@@ -130,3 +131,11 @@ sudo install -m755 contrib/nxctl-sleep /usr/lib/systemd/system-sleep/nxctl-sleep
 ```
 
 Ajusta la ruta de `--config` en la unit de sistema según tu instalación.
+
+## TUI interactiva
+
+```bash
+nxctl tui [--socket PATH] [--interval SECS]
+```
+
+Teclas: `q`/`Esc`/`Ctrl+C` salir · `↑`/`↓` o `j`/`k` elegir perfil · `Enter`/`a` aplicar perfil · `r` recargar · `Tab` cambiar foco Perfiles/Sensores (↑/↓ desplaza el panel enfocado) · `c` siguiente curva (el punto rojo marca la temperatura actual) · `?` ayuda con todas las teclas.

@@ -4,6 +4,7 @@ members = [
     "crates/nxctl-core",
     "crates/nxctl",
     "crates/nxctld",
+    "crates/nxctl-gui",
 ]
 
 [workspace.package]
@@ -23,3 +24,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "6"
 ctrlc = "3"
 signal-hook = "0.3"
+ratatui = "0.30.2"
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+egui_plot = "0.38"

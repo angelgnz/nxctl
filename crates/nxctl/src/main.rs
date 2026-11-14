@@ -1,3 +1,5 @@
+mod tui;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -72,6 +74,14 @@ enum Command {
     /// Control del daemon nxctld en ejecución
     #[command(subcommand)]
     Daemon(DaemonCmd),
+    /// Interfaz de terminal interactiva (TUI)
+    Tui {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// Intervalo de refresco en segundos
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -418,6 +428,11 @@ fn main() -> Result<()> {
                 println!("  {:>5.1}°C -> {:>3}%", p.temp_c, p.duty);
             }
         }
+        Command::Tui { socket, interval } => {
+            let config = Config::load(cfg_path)?;
+            let sock = socket.unwrap_or_else(default_socket_path);
+            tui::run(config, cli.dry_run, sock, interval)?;
+        }
         Command::Daemon(cmd) => match cmd {
             DaemonCmd::Status { socket, json } => {
                 let sock = socket.unwrap_or_else(default_socket_path);
@@ -510,6 +525,15 @@ mod tests {
         assert!(matches!(
             sensors_json.command,
             Command::Sensors { json: true }
+        ));
+
+        let tui_cmd = Cli::try_parse_from(["nxctl", "tui", "--interval", "5"]).unwrap();
+        assert!(matches!(
+            tui_cmd.command,
+            Command::Tui {
+                socket: None,
+                interval: 5
+            }
         ));
 
         let sensors = Cli::try_parse_from(["nxctl", "sensors"]).unwrap();
