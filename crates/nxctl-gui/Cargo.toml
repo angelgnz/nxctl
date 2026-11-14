@@ -1,0 +1,19 @@
+[package]
+name = "nxctl-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nxctl-gui"
+path = "src/main.rs"
+
+[dependencies]
+nxctl-core = { path = "../nxctl-core" }
+eframe.workspace = true
+egui_plot.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
