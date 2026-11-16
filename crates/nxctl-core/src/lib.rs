@@ -6,6 +6,7 @@ pub mod hwmon;
 pub mod ipc;
 pub mod liquidctl;
 pub mod nvidia;
+pub mod openrgb;
 pub mod resume;
 
 pub use config::{
@@ -15,7 +16,10 @@ pub use config::{
 pub use curve::{HysteresisController, evaluate_curve};
 pub use engine::{ApplyReport, SpeedChange, apply_profile, step_daemon_tick};
 pub use error::{CoreError, Result};
-pub use hwmon::{HwmonSensorInfo, list_hwmon_sensors, read_hwmon_temp};
+pub use hwmon::{
+    HwmonFanInfo, HwmonSensorInfo, list_hwmon_fans, list_hwmon_sensors, read_hwmon_temp,
+    set_hwmon_pwm,
+};
 pub use ipc::{DaemonStatus, IpcRequest, IpcResponse, default_socket_path, send_request};
 pub use liquidctl::{
     CliLiquidctlBackend, DeviceStatus, LiquidctlBackend, MockCall, MockLiquidctlBackend,

@@ -123,6 +123,10 @@ impl LiquidctlBackend for CliLiquidctlBackend {
         colors: &[String],
         dry_run: bool,
     ) -> Result<()> {
+        if let Some(openrgb_dev) = crate::openrgb::parse_openrgb_target(match_device) {
+            return crate::openrgb::set_openrgb_color(openrgb_dev, channel, mode, colors, dry_run);
+        }
+
         let mut args = vec![
             "--match".to_string(),
             match_device.to_string(),
@@ -147,6 +151,16 @@ impl LiquidctlBackend for CliLiquidctlBackend {
             return Err(CoreError::Validation(format!(
                 "duty cycle {duty} exceeds 100%"
             )));
+        }
+
+        if let Some(hwmon_target) = match_device
+            .strip_prefix("hwmon:")
+            .or_else(|| match_device.strip_prefix("HWMON:"))
+        {
+            return crate::hwmon::set_hwmon_pwm(hwmon_target, channel, duty, dry_run);
+        }
+        if let Some(gpu) = crate::nvidia::parse_nvidia_target(match_device) {
+            return crate::nvidia::set_nvidia_fan_speed(gpu, channel, duty, dry_run);
         }
 
         let args = vec![
@@ -455,5 +469,26 @@ mod tests {
         backend
             .initialize(None, true)
             .expect("dry-run initialize should not spawn binary");
+    }
+
+    #[test]
+    fn cli_backend_dispatches_hwmon_nvidia_and_openrgb() {
+        let backend = CliLiquidctlBackend::with_binary("nonexistent-liquidctl-binary");
+
+        // hwmon target dispatches to hwmon validation instead of spawning liquidctl
+        assert!(matches!(
+            backend.set_speed("hwmon:nonexistent-chip-xyz", "pwm1", 50, true),
+            Err(CoreError::Validation(_))
+        ));
+
+        // nvidia target dispatches to nvidia-settings dry-run
+        backend
+            .set_speed("nvidia:0", "fan0", 70, true)
+            .expect("dry-run nvidia set_speed should succeed");
+
+        // openrgb target dispatches to openrgb dry-run
+        backend
+            .set_color("openrgb:0", "sync", "static", &["ff0000".into()], true)
+            .expect("dry-run openrgb set_color should succeed");
     }
 }

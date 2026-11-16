@@ -106,8 +106,9 @@ impl HysteresisController {
 
         let duty_delta = clamped_duty.abs_diff(prev.last_duty);
         let temp_delta = (temp_c - prev.last_temp_c).abs();
+        let is_max_rising = clamped_duty == 100 && temp_c > prev.last_temp_c;
 
-        if duty_delta < self.min_duty_delta || temp_delta < self.hysteresis_c {
+        if !is_max_rising && (duty_delta < self.min_duty_delta || temp_delta < self.hysteresis_c) {
             return false;
         }
 
@@ -212,5 +213,16 @@ mod tests {
         assert!(ctrl.should_apply("smart:fan1", 35.5, 40));
         // Independent channel tracks its own state.
         assert!(ctrl.should_apply("smart:fan2", 35.5, 40));
+    }
+
+    #[test]
+    fn hysteresis_bypasses_deadband_when_reaching_max_duty_on_rising_temp() {
+        let mut ctrl = HysteresisController::new(2.0, 3);
+
+        assert!(ctrl.should_apply("smart:fan1", 41.0, 85));
+        // temp_delta is 1.0 < 2.0, but reaching 100% on a rising temp applies immediately.
+        assert!(ctrl.should_apply("smart:fan1", 42.0, 100));
+        // Already at 100% -> suppressed.
+        assert!(!ctrl.should_apply("smart:fan1", 42.5, 100));
     }
 }

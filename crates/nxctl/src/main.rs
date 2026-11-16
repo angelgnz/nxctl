@@ -10,8 +10,8 @@ use nxctl_core::config::{
 use nxctl_core::engine::{ApplyReport, apply_profile};
 use nxctl_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
 use nxctl_core::{
-    IpcRequest, IpcResponse, default_socket_path, list_hwmon_sensors, list_nvidia_gpus,
-    send_request,
+    IpcRequest, IpcResponse, default_socket_path, list_hwmon_fans, list_hwmon_sensors,
+    list_nvidia_gpus, send_request,
 };
 
 #[derive(Parser)]
@@ -40,6 +40,9 @@ enum Command {
     Init {
         #[arg(long)]
         force: bool,
+        /// Detecta dispositivos liquidctl, sensores/PWM hwmon y GPUs NVIDIA automáticamente
+        #[arg(long)]
+        detect: bool,
     },
     /// Inicializa los dispositivos vía liquidctl
     InitDevices {
@@ -232,7 +235,7 @@ fn main() -> Result<()> {
     let backend = CliLiquidctlBackend::new();
 
     match cli.command {
-        Command::Init { force } => {
+        Command::Init { force, detect } => {
             let path = match cfg_path {
                 Some(p) => p.to_path_buf(),
                 None => Config::default_path()?,
@@ -243,7 +246,16 @@ fn main() -> Result<()> {
                     path.display()
                 );
             }
-            let saved = Config::starter_nzxt().save(Some(&path))?;
+            let cfg = if detect {
+                let devices = backend.status(None).unwrap_or_default();
+                let sensors = list_hwmon_sensors().unwrap_or_default();
+                let fans = list_hwmon_fans().unwrap_or_default();
+                let nvidia = list_nvidia_gpus().unwrap_or_default();
+                Config::from_detected(&devices, &sensors, &fans, &nvidia)
+            } else {
+                Config::starter_nzxt()
+            };
+            let saved = cfg.save(Some(&path))?;
             println!("Configuración creada en {}", saved.display());
         }
         Command::InitDevices { match_ } => {
@@ -286,33 +298,56 @@ fn main() -> Result<()> {
         }
         Command::Sensors { json } => {
             let sensors = list_hwmon_sensors().context("listando sensores hwmon")?;
+            let fans = list_hwmon_fans().unwrap_or_default();
             let nvidia_gpus = list_nvidia_gpus().context("listando sensores nvidia")?;
             if json {
                 let payload = serde_json::json!({
                     "hwmon": sensors,
+                    "hwmon_fans": fans,
                     "nvidia": nvidia_gpus,
                 });
                 println!("{}", serde_json::to_string_pretty(&payload)?);
-            } else if sensors.is_empty() && nvidia_gpus.is_empty() {
+            } else if sensors.is_empty() && nvidia_gpus.is_empty() && fans.is_empty() {
                 println!("No se encontraron sensores de temperatura.");
             } else {
-                println!(
-                    "{:<10} {:<16} {:<24} {:>8}",
-                    "DEVICE", "NAME", "LABEL", "TEMP"
-                );
-                for s in &sensors {
-                    let label = s.label.as_deref().unwrap_or(&s.input_file);
-                    let temp = format!("{:.1} °C", s.temp_c);
+                if !sensors.is_empty() || !nvidia_gpus.is_empty() {
                     println!(
                         "{:<10} {:<16} {:<24} {:>8}",
-                        s.device_dir, s.name, label, temp
+                        "DEVICE", "NAME", "LABEL", "TEMP"
                     );
+                    for s in &sensors {
+                        let label = s.label.as_deref().unwrap_or(&s.input_file);
+                        let temp = format!("{:.1} °C", s.temp_c);
+                        println!(
+                            "{:<10} {:<16} {:<24} {:>8}",
+                            s.device_dir, s.name, label, temp
+                        );
+                    }
+                    for gpu in &nvidia_gpus {
+                        let device = format!("nvidia{}", gpu.index);
+                        let name = format!("GPU {}", gpu.index);
+                        let temp = format!("{:.1} °C", gpu.temp_c);
+                        println!("{:<10} {:<16} {:<24} {:>8}", device, name, gpu.name, temp);
+                    }
                 }
-                for gpu in &nvidia_gpus {
-                    let device = format!("nvidia{}", gpu.index);
-                    let name = format!("GPU {}", gpu.index);
-                    let temp = format!("{:.1} °C", gpu.temp_c);
-                    println!("{:<10} {:<16} {:<24} {:>8}", device, name, gpu.name, temp);
+                if !fans.is_empty() {
+                    if !sensors.is_empty() || !nvidia_gpus.is_empty() {
+                        println!();
+                    }
+                    println!(
+                        "{:<10} {:<16} {:<12} {:>10} {:>6}",
+                        "DEVICE", "NAME", "CHANNEL", "RPM", "DUTY"
+                    );
+                    for f in &fans {
+                        let rpm = f
+                            .rpm
+                            .map_or_else(|| "--".to_string(), |r| format!("{r} RPM"));
+                        let duty = f.duty.map_or_else(|| "--".to_string(), |d| format!("{d}%"));
+                        println!(
+                            "{:<10} {:<16} {:<12} {:>10} {:>6}",
+                            f.device_dir, f.name, f.channel, rpm, duty
+                        );
+                    }
                 }
             }
         }
@@ -502,6 +537,15 @@ mod tests {
         let validate = Cli::try_parse_from(["nxctl", "--dry-run", "validate"]).unwrap();
         assert!(validate.dry_run);
         assert!(matches!(validate.command, Command::Validate));
+
+        let init_detect = Cli::try_parse_from(["nxctl", "init", "--detect"]).unwrap();
+        assert!(matches!(
+            init_detect.command,
+            Command::Init {
+                force: false,
+                detect: true
+            }
+        ));
 
         let init_dev = Cli::try_parse_from(["nxctl", "init-devices", "--match", "kraken"]).unwrap();
         assert!(matches!(

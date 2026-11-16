@@ -281,56 +281,9 @@ impl Config {
         Ok(())
     }
 
-    /// Builds the starter NZXT configuration containing `default`, `silent`, and `performance` profiles.
+    /// Builds the starter NZXT configuration containing `default`, `silent`, `dynamic`, and `performance` profiles.
     pub fn starter_nzxt() -> Self {
-        let mut curves = BTreeMap::new();
-        curves.insert(
-            "quiet".to_string(),
-            FanCurve {
-                points: vec![
-                    CurvePoint {
-                        temp_c: 25.0,
-                        duty: 30,
-                    },
-                    CurvePoint {
-                        temp_c: 35.0,
-                        duty: 45,
-                    },
-                    CurvePoint {
-                        temp_c: 45.0,
-                        duty: 70,
-                    },
-                    CurvePoint {
-                        temp_c: 55.0,
-                        duty: 100,
-                    },
-                ],
-            },
-        );
-        curves.insert(
-            "aggressive".to_string(),
-            FanCurve {
-                points: vec![
-                    CurvePoint {
-                        temp_c: 25.0,
-                        duty: 50,
-                    },
-                    CurvePoint {
-                        temp_c: 32.0,
-                        duty: 70,
-                    },
-                    CurvePoint {
-                        temp_c: 40.0,
-                        duty: 90,
-                    },
-                    CurvePoint {
-                        temp_c: 45.0,
-                        duty: 100,
-                    },
-                ],
-            },
-        );
-
+        let curves = default_curves();
         let purple_sync_lighting = vec![
             LightingRule {
                 match_device: "smart".to_string(),
@@ -389,6 +342,18 @@ impl Config {
         );
 
         profiles.insert(
+            "dynamic".to_string(),
+            Profile {
+                description: Some(
+                    "Dynamic cooling profile: silent up to 35°C liquid, aggressive ramp above"
+                        .to_string(),
+                ),
+                lighting: purple_sync_lighting.clone(),
+                cooling: curve_cooling_rules("dynamic"),
+            },
+        );
+
+        profiles.insert(
             "performance".to_string(),
             Profile {
                 description: Some(
@@ -412,6 +377,254 @@ impl Config {
             profiles,
         }
     }
+
+    /// Builds a configuration automatically from detected liquidctl, hwmon, and NVIDIA hardware.
+    pub fn from_detected(
+        devices: &[crate::liquidctl::DeviceStatus],
+        hwmon_sensors: &[crate::hwmon::HwmonSensorInfo],
+        hwmon_fans: &[crate::hwmon::HwmonFanInfo],
+        nvidia_gpus: &[crate::nvidia::NvidiaGpuInfo],
+    ) -> Self {
+        let mut channels: Vec<(String, String)> = Vec::new();
+        for dev in devices {
+            let match_device = dev.description.trim();
+            if match_device.is_empty() {
+                continue;
+            }
+            for reading in &dev.status {
+                let key = reading.key.trim();
+                let lower = key.to_ascii_lowercase();
+                let prefix = lower
+                    .strip_suffix(" speed")
+                    .or_else(|| lower.strip_suffix(" duty"));
+                let Some(prefix) = prefix else {
+                    continue;
+                };
+                let channel = prefix.replace(' ', "");
+                if channel.is_empty() {
+                    continue;
+                }
+                let pair = (match_device.to_string(), channel);
+                if !channels.contains(&pair) {
+                    channels.push(pair);
+                }
+            }
+        }
+
+        let has_nzxt_liquidctl = devices.iter().any(|d| {
+            let desc = d.description.to_ascii_lowercase();
+            desc.contains("nzxt") || desc.contains("kraken") || desc.contains("smart")
+        });
+
+        for fan in hwmon_fans {
+            let Some(pwm_file) = &fan.pwm_file else {
+                continue;
+            };
+            if fan.name.trim().is_empty() {
+                continue;
+            }
+            let name_lower = fan.name.to_ascii_lowercase();
+            if has_nzxt_liquidctl
+                && (name_lower.starts_with("nzxt") || name_lower.contains("kraken"))
+            {
+                continue;
+            }
+            let pair = (format!("hwmon:{}", fan.name), pwm_file.clone());
+            if !channels.contains(&pair) {
+                channels.push(pair);
+            }
+        }
+
+        if channels.is_empty() && devices.is_empty() {
+            return Self::starter_nzxt();
+        }
+
+        let lighting: Vec<LightingRule> = devices
+            .iter()
+            .filter(|d| !d.description.trim().is_empty())
+            .map(|d| LightingRule {
+                match_device: d.description.clone(),
+                channel: "sync".to_string(),
+                mode: "fixed".to_string(),
+                colors: vec!["7400b8".to_string()],
+            })
+            .collect();
+
+        let temp_sensor = detect_primary_temp_sensor(devices, hwmon_sensors, nvidia_gpus);
+
+        let default_cooling: Vec<CoolingRule> = channels
+            .iter()
+            .map(|(match_device, channel)| {
+                let duty = if channel.to_ascii_lowercase().contains("pump") {
+                    100
+                } else {
+                    60
+                };
+                CoolingRule {
+                    match_device: match_device.clone(),
+                    channel: channel.clone(),
+                    target: CoolingTarget::Fixed { duty },
+                }
+            })
+            .collect();
+
+        let curve_rules = |curve_name: &str| -> Vec<CoolingRule> {
+            channels
+                .iter()
+                .map(|(match_device, channel)| CoolingRule {
+                    match_device: match_device.clone(),
+                    channel: channel.clone(),
+                    target: CoolingTarget::Curve {
+                        curve: curve_name.to_string(),
+                        sensor: None,
+                    },
+                })
+                .collect()
+        };
+
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "default".to_string(),
+            Profile {
+                description: Some("Auto-detected hardware setup (fixed speeds)".to_string()),
+                lighting: lighting.clone(),
+                cooling: default_cooling,
+            },
+        );
+        profiles.insert(
+            "silent".to_string(),
+            Profile {
+                description: Some("Silent cooling profile driven by quiet fan curve".to_string()),
+                lighting: lighting.clone(),
+                cooling: curve_rules("quiet"),
+            },
+        );
+        profiles.insert(
+            "dynamic".to_string(),
+            Profile {
+                description: Some(
+                    "Dynamic cooling profile: quiet below thermal knee, aggressive ramp above"
+                        .to_string(),
+                ),
+                lighting: lighting.clone(),
+                cooling: curve_rules("dynamic"),
+            },
+        );
+        profiles.insert(
+            "performance".to_string(),
+            Profile {
+                description: Some(
+                    "Performance cooling profile driven by aggressive fan curve".to_string(),
+                ),
+                lighting,
+                cooling: curve_rules("aggressive"),
+            },
+        );
+
+        let curves = match &temp_sensor {
+            Some(TempSensorRef::Hwmon { .. } | TempSensorRef::Nvidia { .. }) => cpu_gpu_curves(),
+            _ => default_curves(),
+        };
+
+        Self {
+            default_profile: "default".to_string(),
+            daemon: DaemonConfig {
+                temp_sensor,
+                ..DaemonConfig::default()
+            },
+            curves,
+            profiles,
+        }
+    }
+}
+
+fn build_curves(
+    quiet: [(f32, u8); 4],
+    dynamic: [(f32, u8); 4],
+    aggressive: [(f32, u8); 4],
+) -> BTreeMap<String, FanCurve> {
+    let to_curve = |pts: [(f32, u8); 4]| FanCurve {
+        points: pts
+            .into_iter()
+            .map(|(temp_c, duty)| CurvePoint { temp_c, duty })
+            .collect(),
+    };
+    BTreeMap::from([
+        ("quiet".to_string(), to_curve(quiet)),
+        ("dynamic".to_string(), to_curve(dynamic)),
+        ("aggressive".to_string(), to_curve(aggressive)),
+    ])
+}
+
+fn default_curves() -> BTreeMap<String, FanCurve> {
+    build_curves(
+        [(25.0, 30), (35.0, 45), (45.0, 70), (55.0, 100)],
+        [(25.0, 30), (35.0, 35), (40.0, 75), (44.0, 100)],
+        [(25.0, 50), (32.0, 70), (40.0, 90), (45.0, 100)],
+    )
+}
+
+fn cpu_gpu_curves() -> BTreeMap<String, FanCurve> {
+    build_curves(
+        [(40.0, 30), (55.0, 45), (70.0, 70), (85.0, 100)],
+        [(40.0, 30), (62.0, 40), (74.0, 80), (82.0, 100)],
+        [(40.0, 50), (55.0, 70), (68.0, 90), (78.0, 100)],
+    )
+}
+
+fn detect_primary_temp_sensor(
+    devices: &[crate::liquidctl::DeviceStatus],
+    hwmon_sensors: &[crate::hwmon::HwmonSensorInfo],
+    nvidia_gpus: &[crate::nvidia::NvidiaGpuInfo],
+) -> Option<TempSensorRef> {
+    for dev in devices {
+        if dev.description.trim().is_empty() {
+            continue;
+        }
+        if let Some(reading) = dev.status.iter().find(|r| {
+            let k = r.key.to_ascii_lowercase();
+            (k.contains("liquid") || k.contains("coolant") || k.contains("water"))
+                && r.value.as_f64().is_some()
+        }) {
+            return Some(TempSensorRef::Liquidctl {
+                match_device: dev.description.clone(),
+                key: reading.key.clone(),
+            });
+        }
+    }
+    for dev in devices {
+        if dev.description.trim().is_empty() {
+            continue;
+        }
+        if let Some(reading) = dev.status.iter().find(|r| {
+            r.key.to_ascii_lowercase().contains("temperature") && r.value.as_f64().is_some()
+        }) {
+            return Some(TempSensorRef::Liquidctl {
+                match_device: dev.description.clone(),
+                key: reading.key.clone(),
+            });
+        }
+    }
+    if let Some(s) = hwmon_sensors
+        .iter()
+        .find(|s| matches!(s.name.as_str(), "k10temp" | "coretemp" | "zenpower"))
+        .or_else(|| hwmon_sensors.first())
+    {
+        let hwmon = if s.name.trim().is_empty() {
+            s.device_dir.clone()
+        } else {
+            s.name.clone()
+        };
+        let label = s.label.clone().filter(|l| !l.trim().is_empty());
+        return Some(TempSensorRef::Hwmon { hwmon, label });
+    }
+    if let Some(gpu) = nvidia_gpus.first() {
+        return Some(TempSensorRef::Nvidia {
+            nvidia: true,
+            gpu: Some(gpu.index),
+        });
+    }
+    None
 }
 
 fn curve_cooling_rules(curve_name: &str) -> Vec<CoolingRule> {
@@ -500,6 +713,7 @@ mod tests {
 
         assert_eq!(cfg.default_profile, "default");
         assert!(cfg.curves.contains_key("quiet"));
+        assert!(cfg.curves.contains_key("dynamic"));
         assert!(cfg.curves.contains_key("aggressive"));
 
         let default_profile = cfg.profiles.get("default").expect("default profile");
@@ -531,6 +745,12 @@ mod tests {
         assert!(silent.cooling.iter().all(|r| matches!(
             &r.target,
             CoolingTarget::Curve { curve, .. } if curve == "quiet"
+        )));
+
+        let dynamic = cfg.profiles.get("dynamic").expect("dynamic profile");
+        assert!(dynamic.cooling.iter().all(|r| matches!(
+            &r.target,
+            CoolingTarget::Curve { curve, .. } if curve == "dynamic"
         )));
 
         let performance = cfg
@@ -687,5 +907,105 @@ cooling = []
             gpu: None,
         };
         assert!(validate_sensor_ref(&bad, "t").is_err());
+    }
+
+    #[test]
+    fn from_detected_supports_corsair_hwmon_and_fallback() {
+        use crate::hwmon::{HwmonFanInfo, HwmonSensorInfo};
+        use crate::liquidctl::{DeviceStatus, StatusReading};
+
+        // 1. Corsair/Aquacomputer liquidctl device + coretemp sensor
+        let corsair = DeviceStatus {
+            address: None,
+            bus: Some("hid".into()),
+            description: "Corsair H100i Platinum".into(),
+            status: vec![
+                StatusReading {
+                    key: "Coolant temp".into(),
+                    value: serde_json::json!(32.5),
+                    unit: Some("°C".into()),
+                },
+                StatusReading {
+                    key: "Pump speed".into(),
+                    value: serde_json::json!(2300),
+                    unit: Some("rpm".into()),
+                },
+                StatusReading {
+                    key: "Fan 1 duty".into(),
+                    value: serde_json::json!(45),
+                    unit: Some("%".into()),
+                },
+            ],
+        };
+        let coretemp = HwmonSensorInfo {
+            device_dir: "hwmon1".into(),
+            name: "coretemp".into(),
+            input_file: "temp1_input".into(),
+            label: Some("Package id 0".into()),
+            temp_c: 48.0,
+        };
+        let cfg = Config::from_detected(&[corsair], &[coretemp], &[], &[]);
+        cfg.validate().expect("corsair config should validate");
+        assert_eq!(
+            cfg.daemon.temp_sensor,
+            Some(TempSensorRef::Liquidctl {
+                match_device: "Corsair H100i Platinum".into(),
+                key: "Coolant temp".into(),
+            })
+        );
+        let default_cooling = &cfg.profiles["default"].cooling;
+        assert_eq!(default_cooling.len(), 2);
+        assert_eq!(default_cooling[0].channel, "pump");
+        assert_eq!(default_cooling[0].target, CoolingTarget::Fixed { duty: 100 });
+        assert_eq!(default_cooling[1].channel, "fan1");
+        assert_eq!(default_cooling[1].target, CoolingTarget::Fixed { duty: 60 });
+        assert!(cfg.profiles.contains_key("dynamic"));
+        assert_eq!(cfg.curves["dynamic"].points[1].temp_c, 35.0);
+
+        // 2. Motherboard hwmon PWM fans + k10temp + amdgpu
+        let hwmon_fans = vec![HwmonFanInfo {
+            device_dir: "hwmon2".into(),
+            name: "nct6775".into(),
+            channel: "pwm1".into(),
+            pwm_file: Some("pwm1".into()),
+            fan_file: Some("fan1_input".into()),
+            label: Some("Chassis".into()),
+            rpm: Some(1100),
+            duty: Some(50),
+            pwm_enable: Some(2),
+        }];
+        let sensors = vec![
+            HwmonSensorInfo {
+                device_dir: "hwmon0".into(),
+                name: "k10temp".into(),
+                input_file: "temp1_input".into(),
+                label: Some("Tctl".into()),
+                temp_c: 55.0,
+            },
+            HwmonSensorInfo {
+                device_dir: "hwmon3".into(),
+                name: "amdgpu".into(),
+                input_file: "temp1_input".into(),
+                label: Some("edge".into()),
+                temp_c: 62.0,
+            },
+        ];
+        let cfg_mobo = Config::from_detected(&[], &sensors, &hwmon_fans, &[]);
+        cfg_mobo.validate().expect("mobo config should validate");
+        assert_eq!(
+            cfg_mobo.daemon.temp_sensor,
+            Some(TempSensorRef::Hwmon {
+                hwmon: "k10temp".into(),
+                label: Some("Tctl".into()),
+            })
+        );
+        assert_eq!(cfg_mobo.profiles["default"].cooling[0].match_device, "hwmon:nct6775");
+        assert_eq!(cfg_mobo.profiles["default"].cooling[0].channel, "pwm1");
+        assert!(cfg_mobo.profiles.contains_key("dynamic"));
+        assert_eq!(cfg_mobo.curves["dynamic"].points[1].temp_c, 62.0);
+
+        // 3. Empty inputs fall back to starter_nzxt
+        let fallback = Config::from_detected(&[], &[], &[], &[]);
+        assert_eq!(fallback, Config::starter_nzxt());
     }
 }

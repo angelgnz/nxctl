@@ -13,7 +13,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{HLine, Line, Plot, PlotPoints, Points, VLine};
-use nxctl_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
+use nxctl_core::liquidctl::{CliLiquidctlBackend, DeviceStatus, LiquidctlBackend};
 use nxctl_core::{
     Config, FanCurve, IpcRequest, IpcResponse, apply_profile, default_socket_path, evaluate_curve,
     send_request,
@@ -887,17 +887,52 @@ fn stat_tile(
         });
 }
 
+/// Detects the primary liquid cooler/AIO device description across brands.
+fn detect_aio_description(devices: &[DeviceStatus]) -> String {
+    devices
+        .iter()
+        .find(|d| {
+            let desc = d.description.to_ascii_lowercase();
+            desc.contains("kraken")
+                || desc.contains("corsair")
+                || desc.contains("hydro")
+                || desc.contains("clc")
+                || desc.contains("aquacomputer")
+                || desc.contains("aio")
+                || d.status.iter().any(|r| {
+                    let k = r.key.to_ascii_lowercase();
+                    k.contains("liquid")
+                        || k.contains("coolant")
+                        || k.contains("water")
+                        || k.contains("pump")
+                })
+        })
+        .map_or_else(|| "AIO (sin detectar)".to_string(), |d| d.description.clone())
+}
+
+/// Finds a flow sensor reading (value and unit) if exposed by the device.
+fn liquid_flow(devices: &[DeviceStatus]) -> Option<(f64, String)> {
+    devices.iter().flat_map(|d| &d.status).find_map(|r| {
+        if r.key.to_ascii_lowercase().contains("flow")
+            && let Some(v) = r.value.as_f64()
+        {
+            let unit = r
+                .unit
+                .as_deref()
+                .filter(|u| !u.trim().is_empty())
+                .unwrap_or("L/min")
+                .to_string();
+            return Some((v, unit));
+        }
+        None
+    })
+}
+
 /// "Circuito refrigerante líquido" card mirroring the reference design.
 fn liquid_card(ui: &mut egui::Ui, snap: &Snapshot) {
-    let pump = snap.channels.iter().find(|c| c.channel == "pump");
-    let desc = snap
-        .devices
-        .iter()
-        .find(|d| d.description.to_lowercase().contains("kraken"))
-        .map_or_else(
-            || "Kraken (sin detectar)".to_string(),
-            |d| d.description.clone(),
-        );
+    let pump = snap.channels.iter().find(|c| c.channel.contains("pump"));
+    let desc = detect_aio_description(&snap.devices);
+    let flow = liquid_flow(&snap.devices);
     let delta = snap
         .liquid_c
         .zip(ambient_proxy(&snap.hwmon))
@@ -974,14 +1009,17 @@ fn liquid_card(ui: &mut egui::Ui, snap: &Snapshot) {
                 "RPM",
                 CYAN,
             );
-            // The X53/X63/X73 expose no flow sensor; keep the tile but mark it unavailable.
+            let (flow_val, flow_unit, flow_color) = match flow {
+                Some((v, u)) => (format!("{v:.1}"), u, CYAN),
+                None => ("N/D".to_string(), "L/min".to_string(), TEXT_MUTED),
+            };
             stat_tile(
                 &mut cols[3],
                 TileIcon::Flow,
                 "Caudal",
-                "N/D",
-                "L/min",
-                TEXT_MUTED,
+                &flow_val,
+                &flow_unit,
+                flow_color,
             );
         });
     });
@@ -1039,5 +1077,39 @@ mod liquid_tests {
         ];
         assert_eq!(ambient_proxy(&s), Some(33.5));
         assert_eq!(ambient_proxy(&[sensor("nvme", 40.0)]), None);
+    }
+
+    #[test]
+    fn detects_generic_aio_and_flow() {
+        use nxctl_core::StatusReading;
+
+        assert_eq!(detect_aio_description(&[]), "AIO (sin detectar)");
+        assert_eq!(liquid_flow(&[]), None);
+
+        let aqua = DeviceStatus {
+            address: None,
+            bus: Some("hid".into()),
+            description: "Aquacomputer D5 Next".into(),
+            status: vec![
+                StatusReading {
+                    key: "Coolant temperature".into(),
+                    value: serde_json::json!(30.4),
+                    unit: Some("°C".into()),
+                },
+                StatusReading {
+                    key: "Flow rate".into(),
+                    value: serde_json::json!(120.5),
+                    unit: Some("L/h".into()),
+                },
+            ],
+        };
+        assert_eq!(
+            detect_aio_description(std::slice::from_ref(&aqua)),
+            "Aquacomputer D5 Next"
+        );
+        assert_eq!(
+            liquid_flow(std::slice::from_ref(&aqua)),
+            Some((120.5, "L/h".to_string()))
+        );
     }
 }

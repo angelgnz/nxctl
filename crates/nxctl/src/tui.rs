@@ -62,7 +62,14 @@ fn liquid_temp(s: &TuiSnapshot) -> Option<f32> {
     s.devices
         .iter()
         .flat_map(|d| &d.status)
-        .find(|r| r.key.eq_ignore_ascii_case("Liquid temperature"))
+        .find(|r| {
+            let lower = r.key.to_ascii_lowercase();
+            (lower == "liquid temperature"
+                || lower.contains("liquid")
+                || lower.contains("coolant")
+                || lower.contains("water"))
+                && r.value.as_f64().is_some()
+        })
         .and_then(|r| r.value.as_f64())
         .map(|v| v as f32)
 }
@@ -70,12 +77,18 @@ fn liquid_temp(s: &TuiSnapshot) -> Option<f32> {
 fn cpu_temp(s: &TuiSnapshot) -> Option<f32> {
     s.hwmon
         .iter()
-        .find(|h| h.name == "k10temp" || h.name == "coretemp")
+        .find(|h| h.name == "k10temp" || h.name == "coretemp" || h.name == "zenpower")
+        .or_else(|| s.hwmon.first())
         .map(|h| h.temp_c)
 }
 
 fn gpu_temp(s: &TuiSnapshot) -> Option<f32> {
-    s.nvidia.first().map(|g| g.temp_c)
+    s.nvidia.first().map(|g| g.temp_c).or_else(|| {
+        s.hwmon
+            .iter()
+            .find(|h| matches!(h.name.as_str(), "amdgpu" | "radeon" | "xe" | "i915"))
+            .map(|h| h.temp_c)
+    })
 }
 
 /// Estado completo de la interfaz.

@@ -17,11 +17,11 @@ sudo install -m755 target/release/{nxctl,nxctld} /usr/local/bin/
 ## Uso
 
 ```sh
-nxctl init                  # crea la config inicial (--force para sobrescribir)
+nxctl init [--detect] [--force]     # crea la config inicial (--detect detecta tu hardware)
 nxctl init-devices [--match kraken]  # ejecuta `liquidctl initialize`
 nxctl validate              # valida config.toml sin aplicar cambios
 nxctl status [--match kraken] [--json]
-nxctl sensors [--json]      # lista sensores de temperatura hwmon (CPU/GPU) y NVIDIA (nvidia-smi)
+nxctl sensors [--json]      # lista sensores de temperatura, canales PWM/fan (hwmon) y NVIDIA
 nxctl apply [PERFIL]        # por defecto config.default_profile
 nxctl set color <MATCH> <CANAL> <MODO> <COLORES...>
 nxctl set speed <MATCH> <CANAL> <0-100>
@@ -76,6 +76,14 @@ match_device = "smart"
 channel = "fan2"
 target = { curve = "aggressive", sensor = { nvidia = true, gpu = 0 } }
 ```
+
+### Soporte multi-hardware (PWM `hwmon`, NVIDIA y OpenRGB)
+
+- **Autodetección inicial (`nxctl init --detect`)**: genera `config.toml` inspeccionando dispositivos `liquidctl` (NZXT, Corsair, Aquacomputer, EVGA, etc.), canales PWM de `hwmon` y GPUs NVIDIA, incluyendo perfiles `default`, `silent`, `dynamic` y `performance` (con umbrales ajustados automáticamente según si el sensor es de líquido o CPU/GPU).
+- **Perfil y curva `dynamic`**: mantiene un tramo plano y silencioso hasta la rodilla térmica (`35 °C` en líquido / `62 °C` en CPU/GPU) y acelera de forma agresiva al superarla (`100%` con bypass de histéresis al subir).
+- **Ventiladores de placa base o GPU AMD (`hwmon` PWM)**: usa `match_device = "hwmon:<chip>"` (o `hwmon0`) y `channel = "pwm1"` / `"fan1"` tanto en `config.toml` como en `nxctl set speed hwmon:nct6775 pwm1 60`. Requiere permisos de escritura en `/sys/class/hwmon/hwmon*/pwm*`.
+- **Ventiladores NVIDIA (`nvidia-settings`)**: usa `match_device = "nvidia"` (o `"nvidia:0"`) y `channel = "fan0"` / `"fan"` para controlar la velocidad del ventilador mediante `nvidia-settings`.
+- **Iluminación genérica (`openrgb`)**: usa `match_device = "openrgb"` (o `"openrgb:0"`) en reglas `lighting` o con `nxctl set color openrgb sync static 7400b8` para delegar al CLI de OpenRGB.
 
 ## Permisos rootless (`udev`)
 

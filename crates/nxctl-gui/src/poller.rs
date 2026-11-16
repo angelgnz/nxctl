@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use nxctl_core::liquidctl::{CliLiquidctlBackend, DeviceStatus, LiquidctlBackend};
 use nxctl_core::{
-    DaemonStatus, HwmonSensorInfo, IpcRequest, IpcResponse, NvidiaGpuInfo, list_hwmon_sensors,
-    list_nvidia_gpus, send_request,
+    DaemonStatus, HwmonFanInfo, HwmonSensorInfo, IpcRequest, IpcResponse, NvidiaGpuInfo,
+    list_hwmon_fans, list_hwmon_sensors, list_nvidia_gpus, send_request,
 };
 
 /// Number of samples kept per temperature history.
@@ -80,21 +80,55 @@ pub fn extract_channels(devices: &[DeviceStatus]) -> Vec<ChannelInfo> {
     out
 }
 
-/// Finds the liquid temperature reading among device statuses.
+/// Extracts controllable hwmon PWM channels, skipping NZXT kernel hwmon duplicates when liquidctl devices exist.
+pub fn extract_hwmon_channels(fans: &[HwmonFanInfo], devices: &[DeviceStatus]) -> Vec<ChannelInfo> {
+    let has_liquidctl = !devices.is_empty();
+    let mut out = Vec::new();
+    for f in fans {
+        let Some(pwm_file) = f.pwm_file.clone() else {
+            continue;
+        };
+        if f.name.trim().is_empty() {
+            continue;
+        }
+        let lower_name = f.name.to_ascii_lowercase();
+        if has_liquidctl && (lower_name.starts_with("nzxt") || lower_name.contains("kraken")) {
+            continue;
+        }
+        let label = f.label.clone().unwrap_or_else(|| pwm_file.clone());
+        out.push(ChannelInfo {
+            device: format!("hwmon:{}", f.name),
+            channel: pwm_file,
+            label,
+            rpm: f.rpm.map(f64::from),
+            duty: f.duty.map(f32::from),
+        });
+    }
+    out
+}
+
+/// Finds the liquid/coolant temperature reading among device statuses.
 pub fn liquid_temp(devices: &[DeviceStatus]) -> Option<f32> {
     devices
         .iter()
         .flat_map(|d| d.status.iter())
-        .find(|r| r.key.eq_ignore_ascii_case("Liquid temperature"))
+        .find(|r| {
+            let lower = r.key.to_ascii_lowercase();
+            (lower == "liquid temperature"
+                || lower.contains("liquid")
+                || lower.contains("coolant")
+                || lower.contains("water"))
+                && r.value.as_f64().is_some()
+        })
         .and_then(|r| r.value.as_f64())
         .map(|v| v as f32)
 }
 
-/// Picks the CPU package temperature from hwmon sensors (`k10temp` / `coretemp`).
+/// Picks the CPU package temperature from hwmon sensors (`k10temp` / `coretemp` / `zenpower`).
 pub fn cpu_temp(sensors: &[HwmonSensorInfo]) -> Option<f32> {
     let cpu: Vec<&HwmonSensorInfo> = sensors
         .iter()
-        .filter(|s| s.name == "k10temp" || s.name == "coretemp")
+        .filter(|s| s.name == "k10temp" || s.name == "coretemp" || s.name == "zenpower")
         .collect();
     cpu.iter()
         .find(|s| {
@@ -104,6 +138,16 @@ pub fn cpu_temp(sensors: &[HwmonSensorInfo]) -> Option<f32> {
         })
         .or_else(|| cpu.first())
         .map(|s| s.temp_c)
+}
+
+/// Picks the GPU temperature from NVIDIA `nvidia-smi` or Linux DRM hwmon (`amdgpu`, `radeon`, `xe`, `i915`).
+pub fn gpu_temp(nvidia: &[NvidiaGpuInfo], hwmon: &[HwmonSensorInfo]) -> Option<f32> {
+    nvidia.first().map(|g| g.temp_c).or_else(|| {
+        hwmon
+            .iter()
+            .find(|s| matches!(s.name.as_str(), "amdgpu" | "radeon" | "xe" | "i915"))
+            .map(|s| s.temp_c)
+    })
 }
 
 /// One consistent poll result, including rolling histories.
@@ -146,15 +190,18 @@ impl Poller {
                     Err(e) => snap.backend_error = Some(e.to_string()),
                 }
                 snap.hwmon = list_hwmon_sensors().unwrap_or_default();
+                let hwmon_fans = list_hwmon_fans().unwrap_or_default();
                 snap.nvidia = list_nvidia_gpus().unwrap_or_default();
                 snap.daemon = match send_request(&socket, &IpcRequest::Status) {
                     Ok(IpcResponse::Status { daemon }) => Some(daemon),
                     _ => None,
                 };
                 snap.channels = extract_channels(&snap.devices);
+                snap.channels
+                    .extend(extract_hwmon_channels(&hwmon_fans, &snap.devices));
                 snap.liquid_c = liquid_temp(&snap.devices);
                 snap.cpu_c = cpu_temp(&snap.hwmon);
-                snap.gpu_c = snap.nvidia.first().map(|g| g.temp_c);
+                snap.gpu_c = gpu_temp(&snap.nvidia, &snap.hwmon);
                 if let Some(v) = snap.liquid_c {
                     push_capped(&mut liquid, f64::from(v), HISTORY_LEN);
                 }
@@ -229,5 +276,61 @@ mod tests {
         assert_eq!(ch[0].duty, Some(60.0));
         assert_eq!(ch[1].channel, "fan1");
         assert_eq!(liquid_temp(&[dev]), Some(31.0));
+    }
+
+    #[test]
+    fn supports_corsair_liquid_amd_gpu_and_hwmon_channels() {
+        let corsair = DeviceStatus {
+            address: None,
+            bus: None,
+            description: "Corsair H100i".into(),
+            status: vec![StatusReading {
+                key: "Coolant temp".into(),
+                value: serde_json::json!(29.5),
+                unit: Some("°C".into()),
+            }],
+        };
+        assert_eq!(liquid_temp(std::slice::from_ref(&corsair)), Some(29.5));
+
+        let amd = HwmonSensorInfo {
+            device_dir: "hwmon3".into(),
+            name: "amdgpu".into(),
+            input_file: "temp1_input".into(),
+            label: Some("edge".into()),
+            temp_c: 64.0,
+        };
+        assert_eq!(gpu_temp(&[], std::slice::from_ref(&amd)), Some(64.0));
+
+        let fans = vec![
+            HwmonFanInfo {
+                device_dir: "hwmon1".into(),
+                name: "nzxt_kraken3".into(),
+                channel: "pwm1".into(),
+                pwm_file: Some("pwm1".into()),
+                fan_file: None,
+                label: None,
+                rpm: Some(2000),
+                duty: Some(80),
+                pwm_enable: Some(1),
+            },
+            HwmonFanInfo {
+                device_dir: "hwmon2".into(),
+                name: "nct6775".into(),
+                channel: "pwm1".into(),
+                pwm_file: Some("pwm1".into()),
+                fan_file: Some("fan1_input".into()),
+                label: Some("Chassis 1".into()),
+                rpm: Some(950),
+                duty: Some(45),
+                pwm_enable: Some(1),
+            },
+        ];
+        let ch = extract_hwmon_channels(&fans, &[corsair]);
+        assert_eq!(ch.len(), 1);
+        assert_eq!(ch[0].device, "hwmon:nct6775");
+        assert_eq!(ch[0].channel, "pwm1");
+        assert_eq!(ch[0].label, "Chassis 1");
+        assert_eq!(ch[0].rpm, Some(950.0));
+        assert_eq!(ch[0].duty, Some(45.0));
     }
 }

@@ -96,6 +96,78 @@ pub fn read_nvidia_temp(gpu: Option<u32>) -> std::result::Result<f32, String> {
     read_nvidia_temp_from_csv(&csv, gpu)
 }
 
+/// Parses a `match_device` target (`"nvidia"`, `"nvidia:0"`, `"nvidia:gpu0"`).
+pub fn parse_nvidia_target(match_device: &str) -> Option<Option<u32>> {
+    let trimmed = match_device.trim();
+    if trimmed.eq_ignore_ascii_case("nvidia") {
+        return Some(None);
+    }
+    let prefix = trimmed.get(..7)?;
+    if !prefix.eq_ignore_ascii_case("nvidia:") {
+        return None;
+    }
+    let rest = trimmed[7..].trim();
+    let idx_str = if rest.len() >= 3 && rest[..3].eq_ignore_ascii_case("gpu") {
+        rest[3..].trim()
+    } else {
+        rest
+    };
+    idx_str.parse::<u32>().ok().map(Some)
+}
+
+/// Builds `nvidia-settings` arguments to apply a fan duty (`0..=100`).
+pub fn build_nvidia_fan_args(
+    gpu: Option<u32>,
+    channel: &str,
+    duty: u8,
+) -> crate::Result<Vec<String>> {
+    if duty > 100 {
+        return Err(CoreError::Validation(format!(
+            "duty cycle {duty} exceeds 100%"
+        )));
+    }
+    let gpu_idx = gpu.unwrap_or(0);
+    let ch = channel.trim().to_ascii_lowercase();
+    let fan_idx: u32 = match ch.as_str() {
+        "fan" | "all" | "default" | "gpu" => 0,
+        _ => {
+            let num = ch.strip_prefix("fan").unwrap_or(&ch);
+            num.parse::<u32>().map_err(|_| {
+                CoreError::Validation(format!("invalid NVIDIA fan channel '{channel}'"))
+            })?
+        }
+    };
+    Ok(vec![
+        "-a".to_string(),
+        format!("[gpu:{gpu_idx}]/GPUFanControlState=1"),
+        "-a".to_string(),
+        format!("[fan:{fan_idx}]/GPUTargetFanSpeed={duty}"),
+    ])
+}
+
+/// Sets an NVIDIA GPU fan speed (`0..=100`) using `nvidia-settings`.
+pub fn set_nvidia_fan_speed(
+    gpu: Option<u32>,
+    channel: &str,
+    duty: u8,
+    dry_run: bool,
+) -> crate::Result<()> {
+    let args = build_nvidia_fan_args(gpu, channel, duty)?;
+    if dry_run {
+        tracing::info!(?args, "dry-run: nvidia-settings fan speed");
+        return Ok(());
+    }
+    let output = Command::new("nvidia-settings").args(&args).output()?;
+    if !output.status.success() {
+        return Err(CoreError::Io(std::io::Error::other(format!(
+            "nvidia-settings failed (exit code: {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +216,43 @@ mod tests {
         assert!(read_nvidia_temp_from_csv(csv, Some(2)).is_err());
         assert!(read_nvidia_temp_from_csv("", None).is_err());
         assert!(read_nvidia_temp_from_csv("bad", None).is_err());
+    }
+
+    #[test]
+    fn parses_nvidia_targets_and_builds_fan_args() {
+        assert_eq!(parse_nvidia_target("nvidia"), Some(None));
+        assert_eq!(parse_nvidia_target("NVIDIA"), Some(None));
+        assert_eq!(parse_nvidia_target("nvidia:0"), Some(Some(0)));
+        assert_eq!(parse_nvidia_target("nvidia:gpu1"), Some(Some(1)));
+        assert_eq!(parse_nvidia_target("nvidia:bad"), None);
+        assert_eq!(parse_nvidia_target("kraken"), None);
+
+        assert_eq!(
+            build_nvidia_fan_args(None, "fan", 75).unwrap(),
+            vec![
+                "-a",
+                "[gpu:0]/GPUFanControlState=1",
+                "-a",
+                "[fan:0]/GPUTargetFanSpeed=75"
+            ]
+        );
+        assert_eq!(
+            build_nvidia_fan_args(Some(1), "fan2", 80).unwrap(),
+            vec![
+                "-a",
+                "[gpu:1]/GPUFanControlState=1",
+                "-a",
+                "[fan:2]/GPUTargetFanSpeed=80"
+            ]
+        );
+        assert!(matches!(
+            build_nvidia_fan_args(None, "fan", 101),
+            Err(CoreError::Validation(_))
+        ));
+        assert!(matches!(
+            build_nvidia_fan_args(None, "pump", 50),
+            Err(CoreError::Validation(_))
+        ));
+        set_nvidia_fan_speed(Some(0), "fan0", 60, true).expect("dry-run should succeed");
     }
 }
