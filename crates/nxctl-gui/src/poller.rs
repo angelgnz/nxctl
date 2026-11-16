@@ -1,22 +1,42 @@
 //! Background polling thread feeding the GUI with hardware and daemon telemetry.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
-use nxctl_core::liquidctl::{CliLiquidctlBackend, DeviceStatus, LiquidctlBackend};
+use nxctl_core::liquidctl::{
+    CliLiquidctlBackend, DeviceLightingInfo, DeviceStatus, LiquidctlBackend,
+};
 use nxctl_core::{
     DaemonStatus, HwmonFanInfo, HwmonSensorInfo, IpcRequest, IpcResponse, NvidiaGpuInfo,
-    list_hwmon_fans, list_hwmon_sensors, list_nvidia_gpus, send_request,
+    list_hwmon_fans, list_hwmon_sensors, list_liquidctl_lighting_info, list_nvidia_gpus,
+    send_request,
 };
 
 /// Number of samples kept per temperature history.
 pub const HISTORY_LEN: usize = 60;
 /// Interval between automatic polls.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Returns a stable identifier for a `hwmon` sensor.
+pub fn hwmon_sensor_id(s: &HwmonSensorInfo) -> String {
+    format!("hwmon:{}:{}", s.device_dir, s.input_file)
+}
+
+/// Appends each `hwmon` sensor's temperature to its rolling history, capped at `cap`.
+pub fn update_hwmon_history(
+    history: &mut HashMap<String, VecDeque<f64>>,
+    sensors: &[HwmonSensorInfo],
+    cap: usize,
+) {
+    for s in sensors {
+        let entry = history.entry(hwmon_sensor_id(s)).or_default();
+        push_capped(entry, f64::from(s.temp_c), cap);
+    }
+}
 
 /// Appends `value` to `history`, dropping the oldest samples beyond `cap`.
 pub fn push_capped(history: &mut VecDeque<f64>, value: f64, cap: usize) {
@@ -165,6 +185,8 @@ pub struct Snapshot {
     pub liquid_history: VecDeque<f64>,
     pub cpu_history: VecDeque<f64>,
     pub gpu_history: VecDeque<f64>,
+    pub hwmon_history: HashMap<String, VecDeque<f64>>,
+    pub lighting_info: HashMap<String, DeviceLightingInfo>,
 }
 
 /// Handle to the polling thread.
@@ -183,12 +205,29 @@ impl Poller {
             let mut liquid = VecDeque::new();
             let mut cpu = VecDeque::new();
             let mut gpu = VecDeque::new();
+            let mut hwmon_hist: HashMap<String, VecDeque<f64>> = HashMap::new();
+            let mut cached_lighting: HashMap<String, DeviceLightingInfo> = HashMap::new();
+            let mut prev_device_descs: Vec<String> = Vec::new();
+            let mut lighting_loaded = false;
             loop {
                 let mut snap = Snapshot::default();
                 match backend.status(None) {
                     Ok(d) => snap.devices = d,
                     Err(e) => snap.backend_error = Some(e.to_string()),
                 }
+                let current_descs: Vec<String> =
+                    snap.devices.iter().map(|d| d.description.clone()).collect();
+                if !lighting_loaded || current_descs != prev_device_descs {
+                    let list = list_liquidctl_lighting_info();
+                    cached_lighting = list
+                        .into_iter()
+                        .map(|info| (info.description.clone(), info))
+                        .collect();
+                    prev_device_descs = current_descs;
+                    lighting_loaded = true;
+                }
+                snap.lighting_info = cached_lighting.clone();
+
                 snap.hwmon = list_hwmon_sensors().unwrap_or_default();
                 let hwmon_fans = list_hwmon_fans().unwrap_or_default();
                 snap.nvidia = list_nvidia_gpus().unwrap_or_default();
@@ -214,6 +253,8 @@ impl Poller {
                 snap.liquid_history = liquid.clone();
                 snap.cpu_history = cpu.clone();
                 snap.gpu_history = gpu.clone();
+                update_hwmon_history(&mut hwmon_hist, &snap.hwmon, HISTORY_LEN);
+                snap.hwmon_history = hwmon_hist.clone();
                 if tx.send(Arc::new(snap)).is_err() {
                     break;
                 }
@@ -332,5 +373,47 @@ mod tests {
         assert_eq!(ch[0].label, "Chassis 1");
         assert_eq!(ch[0].rpm, Some(950.0));
         assert_eq!(ch[0].duty, Some(45.0));
+    }
+
+    #[test]
+    fn snapshot_default_has_empty_lighting_info() {
+        let snap = Snapshot::default();
+        assert!(snap.lighting_info.is_empty());
+        assert!(snap.hwmon_history.is_empty());
+    }
+
+    #[test]
+    fn hwmon_history_tracks_and_caps_per_sensor() {
+        let mut s1 = HwmonSensorInfo {
+            device_dir: "hwmon4".into(),
+            name: "nvme".into(),
+            input_file: "temp1_input".into(),
+            label: Some("Composite".into()),
+            temp_c: 40.0,
+        };
+        let s2 = HwmonSensorInfo {
+            device_dir: "hwmon5".into(),
+            name: "spd5118".into(),
+            input_file: "temp1_input".into(),
+            label: None,
+            temp_c: 34.5,
+        };
+        assert_eq!(hwmon_sensor_id(&s1), "hwmon:hwmon4:temp1_input");
+        assert_eq!(hwmon_sensor_id(&s2), "hwmon:hwmon5:temp1_input");
+
+        let mut hist: HashMap<String, VecDeque<f64>> = HashMap::new();
+        for i in 0..75 {
+            s1.temp_c = 30.0 + i as f32;
+            update_hwmon_history(&mut hist, &[s1.clone(), s2.clone()], HISTORY_LEN);
+        }
+
+        let h1 = &hist["hwmon:hwmon4:temp1_input"];
+        assert_eq!(h1.len(), HISTORY_LEN);
+        assert_eq!(h1.front().copied(), Some(45.0));
+        assert_eq!(h1.back().copied(), Some(104.0));
+
+        let h2 = &hist["hwmon:hwmon5:temp1_input"];
+        assert_eq!(h2.len(), HISTORY_LEN);
+        assert_eq!(h2.back().copied(), Some(34.5));
     }
 }

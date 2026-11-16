@@ -318,9 +318,8 @@ pub fn set_hwmon_pwm_in(
         }
     }
 
-    let dir = matched_dir.ok_or_else(|| {
-        CoreError::Validation(format!("no hwmon device matched '{wanted}'"))
-    })?;
+    let dir = matched_dir
+        .ok_or_else(|| CoreError::Validation(format!("no hwmon device matched '{wanted}'")))?;
     let pwm_name = resolve_pwm_channel(&dir, channel).ok_or_else(|| {
         CoreError::Validation(format!(
             "hwmon channel '{channel}' not found on '{}'",
@@ -461,7 +460,10 @@ mod tests {
 
         // dry_run does not modify pwm1 or pwm1_enable
         set_hwmon_pwm_in(&base, "nct6775", "pwm1", 100, true).unwrap();
-        assert_eq!(fs::read_to_string(base.join("hwmon2/pwm1")).unwrap(), "128\n");
+        assert_eq!(
+            fs::read_to_string(base.join("hwmon2/pwm1")).unwrap(),
+            "128\n"
+        );
         assert_eq!(
             fs::read_to_string(base.join("hwmon2/pwm1_enable")).unwrap(),
             "2\n"
@@ -469,7 +471,10 @@ mod tests {
 
         // Apply by pwm1, fan1, and label
         set_hwmon_pwm_in(&base, "nct6775", "pwm1", 100, false).unwrap();
-        assert_eq!(fs::read_to_string(base.join("hwmon2/pwm1")).unwrap(), "255\n");
+        assert_eq!(
+            fs::read_to_string(base.join("hwmon2/pwm1")).unwrap(),
+            "255\n"
+        );
         assert_eq!(
             fs::read_to_string(base.join("hwmon2/pwm1_enable")).unwrap(),
             "1\n"

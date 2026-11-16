@@ -112,6 +112,15 @@ pub struct Profile {
     pub cooling: Vec<CoolingRule>,
 }
 
+/// Portable bundle containing a named profile and any fan curves it references.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileBundle {
+    pub name: String,
+    pub profile: Profile,
+    #[serde(default)]
+    pub curves: BTreeMap<String, FanCurve>,
+}
+
 /// Lighting configuration rule targeting a liquidctl device channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LightingRule {
@@ -179,6 +188,65 @@ impl Config {
         let serialized = toml::to_string_pretty(self)?;
         fs::write(&target_path, serialized)?;
         Ok(target_path)
+    }
+
+    /// Exports a named profile and any fan curves it references to a TOML [`ProfileBundle`] file.
+    pub fn export_profile(&self, name: &str, path: &Path) -> Result<()> {
+        let profile = self
+            .profiles
+            .get(name)
+            .ok_or_else(|| CoreError::ProfileNotFound(name.to_string()))?;
+
+        let mut curves = BTreeMap::new();
+        for rule in &profile.cooling {
+            if let CoolingTarget::Curve { curve, .. } = &rule.target
+                && let Some(fan_curve) = self.curves.get(curve)
+            {
+                curves.insert(curve.clone(), fan_curve.clone());
+            }
+        }
+
+        let bundle = ProfileBundle {
+            name: name.to_string(),
+            profile: profile.clone(),
+            curves,
+        };
+        let serialized = toml::to_string_pretty(&bundle)?;
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serialized)?;
+        Ok(())
+    }
+
+    /// Imports a [`ProfileBundle`] from `path`, inserting missing curves and the profile, then validates.
+    pub fn import_profile(&mut self, path: &Path, overwrite: bool) -> Result<String> {
+        let contents = fs::read_to_string(path)?;
+        let bundle: ProfileBundle = toml::from_str(&contents)?;
+        if bundle.name.trim().is_empty() {
+            return Err(CoreError::Validation(
+                "imported profile name must not be empty".to_string(),
+            ));
+        }
+        if !overwrite && self.profiles.contains_key(&bundle.name) {
+            return Err(CoreError::Validation(format!(
+                "profile '{}' already exists",
+                bundle.name
+            )));
+        }
+
+        let mut candidate = self.clone();
+        for (curve_name, curve) in bundle.curves {
+            candidate.curves.entry(curve_name).or_insert(curve);
+        }
+        candidate
+            .profiles
+            .insert(bundle.name.clone(), bundle.profile);
+        candidate.validate()?;
+        *self = candidate;
+        Ok(bundle.name)
     }
 
     /// Validates configuration invariants: existing `default_profile`, valid curves, and valid cooling targets.
@@ -956,7 +1024,10 @@ cooling = []
         let default_cooling = &cfg.profiles["default"].cooling;
         assert_eq!(default_cooling.len(), 2);
         assert_eq!(default_cooling[0].channel, "pump");
-        assert_eq!(default_cooling[0].target, CoolingTarget::Fixed { duty: 100 });
+        assert_eq!(
+            default_cooling[0].target,
+            CoolingTarget::Fixed { duty: 100 }
+        );
         assert_eq!(default_cooling[1].channel, "fan1");
         assert_eq!(default_cooling[1].target, CoolingTarget::Fixed { duty: 60 });
         assert!(cfg.profiles.contains_key("dynamic"));
@@ -999,7 +1070,10 @@ cooling = []
                 label: Some("Tctl".into()),
             })
         );
-        assert_eq!(cfg_mobo.profiles["default"].cooling[0].match_device, "hwmon:nct6775");
+        assert_eq!(
+            cfg_mobo.profiles["default"].cooling[0].match_device,
+            "hwmon:nct6775"
+        );
         assert_eq!(cfg_mobo.profiles["default"].cooling[0].channel, "pwm1");
         assert!(cfg_mobo.profiles.contains_key("dynamic"));
         assert_eq!(cfg_mobo.curves["dynamic"].points[1].temp_c, 62.0);
@@ -1007,5 +1081,80 @@ cooling = []
         // 3. Empty inputs fall back to starter_nzxt
         let fallback = Config::from_detected(&[], &[], &[], &[]);
         assert_eq!(fallback, Config::starter_nzxt());
+    }
+
+    #[test]
+    fn export_and_import_profile_roundtrip_and_overwrite_check() {
+        let mut src = Config::starter_nzxt();
+        let custom_curve = FanCurve {
+            points: vec![
+                CurvePoint {
+                    temp_c: 30.0,
+                    duty: 25,
+                },
+                CurvePoint {
+                    temp_c: 65.0,
+                    duty: 90,
+                },
+            ],
+        };
+        src.curves
+            .insert("custom_curve".into(), custom_curve.clone());
+        let custom_profile = Profile {
+            description: Some("Custom exported profile".into()),
+            lighting: vec![LightingRule {
+                match_device: "kraken".into(),
+                channel: "sync".into(),
+                mode: "fixed".into(),
+                colors: vec!["00e5ff".into()],
+            }],
+            cooling: vec![CoolingRule {
+                match_device: "kraken".into(),
+                channel: "fan".into(),
+                target: CoolingTarget::Curve {
+                    curve: "custom_curve".into(),
+                    sensor: None,
+                },
+            }],
+        };
+        src.profiles.insert("custom".into(), custom_profile.clone());
+
+        let dir = std::env::temp_dir().join(format!("nxctl-profile-test-{}", std::process::id()));
+        let bundle_path = dir.join("nested").join("custom.toml");
+
+        // Exporting nonexistent profile errors.
+        assert!(matches!(
+            src.export_profile("missing", &bundle_path),
+            Err(CoreError::ProfileNotFound(_))
+        ));
+
+        src.export_profile("custom", &bundle_path)
+            .expect("export profile");
+
+        let mut dst = Config::starter_nzxt();
+        assert!(!dst.profiles.contains_key("custom"));
+        assert!(!dst.curves.contains_key("custom_curve"));
+
+        let imported = dst
+            .import_profile(&bundle_path, false)
+            .expect("import profile");
+        assert_eq!(imported, "custom");
+        assert_eq!(dst.profiles.get("custom"), Some(&custom_profile));
+        assert_eq!(dst.curves.get("custom_curve"), Some(&custom_curve));
+        dst.validate().expect("imported config validates");
+
+        // Re-importing with overwrite = false must fail.
+        assert!(matches!(
+            dst.import_profile(&bundle_path, false),
+            Err(CoreError::Validation(_))
+        ));
+
+        // Re-importing with overwrite = true succeeds.
+        let reimported = dst
+            .import_profile(&bundle_path, true)
+            .expect("overwrite import");
+        assert_eq!(reimported, "custom");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

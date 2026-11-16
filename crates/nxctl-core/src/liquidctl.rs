@@ -27,6 +27,58 @@ pub struct StatusReading {
     pub unit: Option<String>,
 }
 
+/// Device lighting capabilities discovered dynamically from liquidctl.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLightingInfo {
+    pub description: String,
+    #[serde(default)]
+    pub channels: Vec<String>,
+    #[serde(default)]
+    pub modes: Vec<String>,
+}
+
+/// Parses lighting info array from JSON.
+pub fn parse_lighting_info_json(json: &str) -> Result<Vec<DeviceLightingInfo>> {
+    let info: Vec<DeviceLightingInfo> = serde_json::from_str(json)?;
+    Ok(info)
+}
+
+/// Dynamically discovers lighting channels and modes for liquidctl devices by inspecting device drivers.
+pub fn list_liquidctl_lighting_info() -> Vec<DeviceLightingInfo> {
+    let script = r#"
+import json, liquidctl
+res = []
+try:
+    for d in liquidctl.find_liquidctl_devices():
+        ch = getattr(d, "_color_channels", None) or getattr(d, "_COLOR_CHANNELS", None) or {}
+        md = getattr(d, "_COLOR_MODES", None) or getattr(d, "_color_modes", None) or {}
+        res.append({
+            "description": getattr(d, "description", "") or "",
+            "channels": [str(k) for k in ch.keys()],
+            "modes": [str(k) for k in md.keys()],
+        })
+    print(json.dumps(res))
+except Exception:
+    print("[]")
+"#;
+
+    let output = match Command::new("python3").args(["-c", script]).output() {
+        Ok(out) => out,
+        Err(_) => return Vec::new(),
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let stdout = match std::str::from_utf8(&output.stdout) {
+        Ok(s) => s.trim(),
+        Err(_) => return Vec::new(),
+    };
+
+    parse_lighting_info_json(stdout).unwrap_or_default()
+}
+
 /// Abstraction over liquidctl execution for querying status and applying lighting/fan changes.
 pub trait LiquidctlBackend: Send + Sync {
     /// Queries device status, optionally filtered by a `liquidctl --match` substring.
@@ -490,5 +542,53 @@ mod tests {
         backend
             .set_color("openrgb:0", "sync", "static", &["ff0000".into()], true)
             .expect("dry-run openrgb set_color should succeed");
+    }
+
+    #[test]
+    fn parse_lighting_info_json_valid() {
+        let json = r#"[
+            {
+                "description": "NZXT Smart Device V2",
+                "channels": ["led1", "led2", "sync"],
+                "modes": ["off", "fixed", "breathing"]
+            },
+            {
+                "description": "NZXT Kraken X (X53, X63 or X73)",
+                "channels": ["ring", "logo"],
+                "modes": []
+            }
+        ]"#;
+        let info = parse_lighting_info_json(json).expect("valid lighting info json");
+        assert_eq!(info.len(), 2);
+        assert_eq!(info[0].description, "NZXT Smart Device V2");
+        assert_eq!(info[0].channels, vec!["led1", "led2", "sync"]);
+        assert_eq!(info[0].modes, vec!["off", "fixed", "breathing"]);
+        assert_eq!(info[1].description, "NZXT Kraken X (X53, X63 or X73)");
+        assert_eq!(info[1].channels, vec!["ring", "logo"]);
+        assert!(info[1].modes.is_empty());
+    }
+
+    #[test]
+    fn parse_lighting_info_json_defaults_missing_fields() {
+        let json = r#"[
+            {
+                "description": "Minimal Device"
+            }
+        ]"#;
+        let info = parse_lighting_info_json(json).expect("valid with missing channels/modes");
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].description, "Minimal Device");
+        assert!(info[0].channels.is_empty());
+        assert!(info[0].modes.is_empty());
+    }
+
+    #[test]
+    fn parse_lighting_info_json_invalid_fails() {
+        assert!(parse_lighting_info_json("invalid json").is_err());
+    }
+
+    #[test]
+    fn list_liquidctl_lighting_info_does_not_panic() {
+        let _ = list_liquidctl_lighting_info();
     }
 }

@@ -11,7 +11,7 @@ pub mod resume;
 
 pub use config::{
     Config, CoolingRule, CoolingTarget, CurvePoint, DaemonConfig, FanCurve, LightingRule, Profile,
-    TempSensorRef,
+    ProfileBundle, TempSensorRef,
 };
 pub use curve::{HysteresisController, evaluate_curve};
 pub use engine::{ApplyReport, SpeedChange, apply_profile, step_daemon_tick};
@@ -22,8 +22,8 @@ pub use hwmon::{
 };
 pub use ipc::{DaemonStatus, IpcRequest, IpcResponse, default_socket_path, send_request};
 pub use liquidctl::{
-    CliLiquidctlBackend, DeviceStatus, LiquidctlBackend, MockCall, MockLiquidctlBackend,
-    StatusReading,
+    CliLiquidctlBackend, DeviceLightingInfo, DeviceStatus, LiquidctlBackend, MockCall,
+    MockLiquidctlBackend, StatusReading, list_liquidctl_lighting_info, parse_lighting_info_json,
 };
 pub use nvidia::{NvidiaGpuInfo, list_nvidia_gpus, read_nvidia_temp};
 pub use resume::{DEFAULT_RESUME_THRESHOLD_SECS, ResumeDetector, detect_resume_gap};

@@ -38,12 +38,7 @@ pub fn build_openrgb_color_args(
         args.push(dev.to_string());
     }
     let ch = channel.trim();
-    if !ch.is_empty()
-        && !matches!(
-            ch.to_ascii_lowercase().as_str(),
-            "sync" | "all" | "default"
-        )
-    {
+    if !ch.is_empty() && !matches!(ch.to_ascii_lowercase().as_str(), "sync" | "all" | "default") {
         args.push("--zone".to_string());
         args.push(ch.to_string());
     }
@@ -101,13 +96,7 @@ mod tests {
     fn builds_openrgb_args_and_supports_dry_run() {
         assert_eq!(
             build_openrgb_color_args(None, "sync", "static", &["7400b8".into()]).unwrap(),
-            vec![
-                "--noautoconnect",
-                "--mode",
-                "static",
-                "--color",
-                "7400b8"
-            ]
+            vec!["--noautoconnect", "--mode", "static", "--color", "7400b8"]
         );
         assert_eq!(
             build_openrgb_color_args(

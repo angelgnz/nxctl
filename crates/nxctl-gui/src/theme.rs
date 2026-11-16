@@ -150,9 +150,196 @@ pub fn draw_radial_gauge(
     );
 }
 
-/// Draws a titled PWM bar with RPM / duty readout.
-pub fn draw_pwm_bar(ui: &mut egui::Ui, title: &str, rpm: Option<f64>, duty: f32, accent: Color32) {
+/// Draws a crisp 3-blade fan rotor inside a subtle ring.
+pub fn draw_fan_icon(ui: &mut egui::Ui, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let center = rect.center();
+    let outer_r = size * 0.44;
+    let hub_r = size * 0.11;
+    let tip_r = size * 0.37;
+
+    painter.circle_stroke(
+        center,
+        outer_r,
+        Stroke::new(1.1, color.gamma_multiply(0.45)),
+    );
+
+    let pt = |r: f32, angle: f32| center + Vec2::new(angle.cos(), angle.sin()) * r;
+    for i in 0..3 {
+        let base = -std::f32::consts::FRAC_PI_2 + i as f32 * (std::f32::consts::TAU / 3.0);
+        let blade = vec![
+            pt(hub_r * 0.9, base - 0.15),
+            pt(tip_r * 0.96, base + 0.04),
+            pt(tip_r, base + 0.34),
+            pt(tip_r * 0.86, base + 0.58),
+            pt(hub_r * 0.9, base + 0.32),
+        ];
+        painter.add(Shape::convex_polygon(blade, color, Stroke::NONE));
+    }
+
+    painter.circle_filled(center, hub_r, color);
+}
+
+/// Draws a crisp liquid-pump impeller with concentric ring and center droplet accent.
+pub fn draw_pump_icon(ui: &mut egui::Ui, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let center = rect.center();
+    let outer_r = size * 0.44;
+    let inner_r = size * 0.27;
+
+    painter.circle_stroke(
+        center,
+        outer_r,
+        Stroke::new(1.1, color.gamma_multiply(0.50)),
+    );
+    painter.circle_stroke(
+        center,
+        inner_r,
+        Stroke::new(1.1, color.gamma_multiply(0.85)),
+    );
+
+    // Four subtle impeller vanes between inner and outer rings.
+    for i in 0..4 {
+        let a = std::f32::consts::FRAC_PI_4 + i as f32 * std::f32::consts::FRAC_PI_2;
+        let dir = Vec2::new(a.cos(), a.sin());
+        painter.line_segment(
+            [center + dir * inner_r, center + dir * (outer_r * 0.95)],
+            Stroke::new(1.1, color.gamma_multiply(0.75)),
+        );
+    }
+
+    // Center droplet / flow accent.
+    let drop_r = size * 0.10;
+    let drop_center = center + Vec2::new(0.0, size * 0.05);
+    painter.circle_filled(drop_center, drop_r, color);
+    let tip = vec![
+        center + Vec2::new(0.0, -size * 0.16),
+        drop_center + Vec2::new(drop_r * 0.95, -drop_r * 0.2),
+        drop_center + Vec2::new(-drop_r * 0.95, -drop_r * 0.2),
+    ];
+    painter.add(Shape::convex_polygon(tip, color, Stroke::NONE));
+}
+
+/// Draws a crisp CPU die icon with pins on all four sides.
+pub fn draw_cpu_icon(ui: &mut egui::Ui, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let c = rect.center();
+    let body = Rect::from_center_size(c, Vec2::splat(size * 0.56));
+    let stroke = Stroke::new(1.2, color);
+    painter.rect_stroke(body, CornerRadius::same(2), stroke, StrokeKind::Inside);
+    painter.rect_filled(
+        Rect::from_center_size(c, Vec2::splat(size * 0.24)),
+        CornerRadius::same(1),
+        color.gamma_multiply(0.85),
+    );
+    let pin = size * 0.14;
+    for offset in [-size * 0.14, size * 0.14] {
+        painter.line_segment(
+            [
+                Pos2::new(c.x + offset, body.top()),
+                Pos2::new(c.x + offset, body.top() - pin),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(c.x + offset, body.bottom()),
+                Pos2::new(c.x + offset, body.bottom() + pin),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(body.left(), c.y + offset),
+                Pos2::new(body.left() - pin, c.y + offset),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(body.right(), c.y + offset),
+                Pos2::new(body.right() + pin, c.y + offset),
+            ],
+            stroke,
+        );
+    }
+}
+
+/// Draws a crisp dual-fan GPU card icon.
+pub fn draw_gpu_icon(ui: &mut egui::Ui, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let c = rect.center();
+    let shroud = Rect::from_center_size(c, Vec2::new(size * 0.84, size * 0.52));
+    let stroke = Stroke::new(1.2, color);
+    painter.rect_stroke(shroud, CornerRadius::same(2), stroke, StrokeKind::Inside);
+    let fan_r = size * 0.14;
+    for dx in [-size * 0.19, size * 0.19] {
+        let fc = Pos2::new(c.x + dx, c.y);
+        painter.circle_stroke(fc, fan_r, stroke);
+        painter.circle_filled(fc, size * 0.04, color);
+    }
+    painter.line_segment(
+        [
+            Pos2::new(shroud.left() - size * 0.06, shroud.top() - size * 0.06),
+            Pos2::new(shroud.left() - size * 0.06, shroud.bottom() + size * 0.08),
+        ],
+        stroke,
+    );
+}
+
+/// Draws a crisp shield icon for Daemon Watchdog.
+pub fn draw_shield_icon(ui: &mut egui::Ui, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let c = rect.center();
+    let w = size * 0.36;
+    let h = size * 0.40;
+    let pts = vec![
+        Pos2::new(c.x, c.y - h),
+        Pos2::new(c.x + w, c.y - h * 0.55),
+        Pos2::new(c.x + w * 0.82, c.y + h * 0.35),
+        Pos2::new(c.x, c.y + h),
+        Pos2::new(c.x - w * 0.82, c.y + h * 0.35),
+        Pos2::new(c.x - w, c.y - h * 0.55),
+    ];
+    painter.add(Shape::closed_line(pts, Stroke::new(1.2, color)));
+    painter.circle_filled(c, size * 0.09, color);
+}
+
+/// Draws a crisp thermometer sensor icon.
+pub fn draw_sensor_icon(ui: &mut egui::Ui, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let c = rect.center();
+    painter.line_segment(
+        [
+            Pos2::new(c.x, c.y - size * 0.34),
+            Pos2::new(c.x, c.y + size * 0.14),
+        ],
+        Stroke::new(2.0, color),
+    );
+    painter.circle_filled(Pos2::new(c.x, c.y + size * 0.24), size * 0.17, color);
+}
+
+/// Draws a titled PWM bar with fan/pump icon and RPM / duty readout.
+pub fn draw_pwm_bar(
+    ui: &mut egui::Ui,
+    title: &str,
+    rpm: Option<f64>,
+    duty: f32,
+    accent: Color32,
+    is_pump: bool,
+) {
     ui.horizontal(|ui| {
+        if is_pump {
+            draw_pump_icon(ui, 14.0, accent);
+        } else {
+            draw_fan_icon(ui, 14.0, accent);
+        }
         ui.label(egui::RichText::new(title).color(TEXT_SECONDARY).size(12.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let rpm_txt = rpm.map_or("-- RPM".to_string(), |r| format!("{r:.0} RPM"));
