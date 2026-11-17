@@ -325,6 +325,56 @@ pub fn draw_sensor_icon(ui: &mut egui::Ui, size: f32, color: Color32) {
     painter.circle_filled(Pos2::new(c.x, c.y + size * 0.24), size * 0.17, color);
 }
 
+/// Draws a crisp color-palette icon (ring with three accent dots) for Pywal Sync.
+pub fn draw_palette_icon(ui: &mut egui::Ui, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let c = rect.center();
+    let r = size * 0.42;
+    painter.circle_stroke(c, r, Stroke::new(1.2, color));
+    let dot_r = size * 0.09;
+    painter.circle_filled(c + Vec2::new(-r * 0.42, -r * 0.20), dot_r, CYAN);
+    painter.circle_filled(c + Vec2::new(r * 0.40, -r * 0.22), dot_r, MAGENTA);
+    painter.circle_filled(c + Vec2::new(0.0, r * 0.42), dot_r, EMERALD);
+}
+
+/// Draws a crisp LED bulb / light-ray icon for RGB strips and channels.
+pub fn draw_led_icon(ui: &mut egui::Ui, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let c = rect.center();
+    painter.circle_filled(c, size * 0.18, color);
+    let inner = size * 0.26;
+    let outer = size * 0.44;
+    let stroke = Stroke::new(1.1, color.gamma_multiply(0.85));
+    for i in 0..6 {
+        let a = i as f32 * (std::f32::consts::TAU / 6.0);
+        let dir = Vec2::new(a.cos(), a.sin());
+        painter.line_segment([c + dir * inner, c + dir * outer], stroke);
+    }
+}
+
+/// Draws a crisp glowing ring icon for `ring` RGB channels.
+pub fn draw_ring_icon(ui: &mut egui::Ui, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let c = rect.center();
+    painter.circle_stroke(c, size * 0.36, Stroke::new(2.0, color));
+    painter.circle_stroke(c, size * 0.18, Stroke::new(1.0, color.gamma_multiply(0.55)));
+}
+
+/// Draws a crisp sync icon (linked ring with opposite nodes) for `sync` RGB channels.
+pub fn draw_sync_icon(ui: &mut egui::Ui, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let c = rect.center();
+    let r = size * 0.34;
+    painter.circle_stroke(c, r, Stroke::new(1.2, color));
+    let node_r = size * 0.10;
+    painter.circle_filled(c + Vec2::new(0.0, -r), node_r, color);
+    painter.circle_filled(c + Vec2::new(0.0, r), node_r, color);
+}
+
 /// Draws a titled PWM bar with fan/pump icon and RPM / duty readout.
 pub fn draw_pwm_bar(
     ui: &mut egui::Ui,

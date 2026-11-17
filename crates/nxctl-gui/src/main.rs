@@ -1,5 +1,6 @@
 //! `nxctl-gui`: native desktop dashboard with the "Obsidian Telemetry" look.
 
+mod i18n;
 mod poller;
 mod theme;
 
@@ -15,8 +16,9 @@ use eframe::egui::{self, Color32, RichText};
 use egui_plot::{HLine, Line, Plot, PlotPoints, Points, VLine};
 use nxctl_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
 use nxctl_core::{
-    Config, CoolingRule, CoolingTarget, FanCurve, IpcRequest, IpcResponse, LightingRule, Profile,
-    apply_profile, default_socket_path, evaluate_curve, send_request,
+    Config, CoolingRule, CoolingTarget, FanCurve, IpcRequest, IpcResponse, Language, LightingRule,
+    Profile, active_palette_entries, apply_profile, apply_pywal_palette, default_socket_path,
+    evaluate_curve, load_pywal_palette, send_request,
 };
 
 use poller::{ChannelInfo, HISTORY_LEN, Poller, Snapshot, hwmon_sensor_id};
@@ -34,9 +36,15 @@ struct Cli {
     /// Do not execute hardware-changing liquidctl commands.
     #[arg(long)]
     dry_run: bool,
+    /// Idioma de la interfaz (es, en).
+    #[arg(long)]
+    lang: Option<Language>,
+    /// Vista inicial (dashboard, fans, rgb, profiles).
+    #[arg(long)]
+    view: Option<View>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum View {
     Dashboard,
     Fans,
@@ -45,12 +53,17 @@ enum View {
 }
 
 impl View {
-    const ALL: [(View, &'static str); 4] = [
-        (View::Dashboard, "Dashboard"),
-        (View::Fans, "Ventiladores"),
-        (View::Rgb, "Iluminación RGB"),
-        (View::Profiles, "Perfiles"),
-    ];
+    const ALL: [View; 4] = [View::Dashboard, View::Fans, View::Rgb, View::Profiles];
+
+    fn label(self, lang: Language) -> &'static str {
+        let t = i18n::tr(lang);
+        match self {
+            Self::Dashboard => t.nav_dashboard,
+            Self::Fans => t.nav_fans,
+            Self::Rgb => t.nav_rgb,
+            Self::Profiles => t.nav_profiles,
+        }
+    }
 }
 
 const RGB_MODES: [&str; 4] = ["fixed", "breathing", "fading", "spectrum-wave"];
@@ -241,13 +254,20 @@ impl NxctlApp {
     fn new(cc: &eframe::CreationContext<'_>, cli: Cli) -> Self {
         apply_obsidian_theme(&cc.egui_ctx);
         let socket = cli.socket.unwrap_or_else(default_socket_path);
-        let (config, status_msg, status_ok) = match Config::load(cli.config.as_deref()) {
-            Ok(c) => (c, "Configuración cargada".to_string(), true),
-            Err(e) => (
-                Config::starter_nzxt(),
-                format!("Config no disponible ({e}); usando valores iniciales"),
-                false,
-            ),
+        let mut config_err = None;
+        let mut config = match Config::load(cli.config.as_deref()) {
+            Ok(c) => c,
+            Err(e) => {
+                config_err = Some(e.to_string());
+                Config::starter_nzxt()
+            }
+        };
+        if let Some(lang) = cli.lang {
+            config.language = lang;
+        }
+        let (status_msg, status_ok) = match config_err {
+            None => (i18n::config_loaded(config.language), true),
+            Some(e) => (i18n::config_unavailable(config.language, &e), false),
         };
         let (action_tx, action_rx) = mpsc::channel();
         Self {
@@ -258,7 +278,7 @@ impl NxctlApp {
             dry_run: cli.dry_run,
             backend: Arc::new(CliLiquidctlBackend::new()),
             snap: Arc::new(Snapshot::default()),
-            view: View::Dashboard,
+            view: cli.view.unwrap_or(View::Dashboard),
             status_msg,
             status_ok,
             action_tx,
@@ -299,17 +319,18 @@ impl NxctlApp {
     }
 
     fn save_and_reload_config(&mut self, ok_msg: String) {
+        let lang = self.config.language;
         match self.config.save(self.config_path.as_deref()) {
             Ok(_) => {
                 if self.daemon_online() {
                     let sock = self.socket.clone();
-                    self.spawn_action(move || ipc(&sock, &IpcRequest::Reload));
+                    self.spawn_action(move || ipc(&sock, &IpcRequest::Reload, lang));
                 }
                 self.status_msg = ok_msg;
                 self.status_ok = true;
             }
             Err(e) => {
-                self.status_msg = format!("Error guardando config: {e}");
+                self.status_msg = i18n::config_save_error(lang, &e);
                 self.status_ok = false;
             }
         }
@@ -347,18 +368,23 @@ impl NxctlApp {
     }
 
     fn do_reload(&mut self) {
-        match Config::load(self.config_path.as_deref()) {
-            Ok(c) => self.config = c,
-            Err(e) => {
-                self.status_msg = format!("Error recargando config: {e}");
-                self.status_ok = false;
+        let load_ok = match Config::load(self.config_path.as_deref()) {
+            Ok(c) => {
+                self.config = c;
+                true
             }
-        }
+            Err(e) => {
+                self.status_msg = i18n::config_reload_error(self.config.language, &e);
+                self.status_ok = false;
+                false
+            }
+        };
+        let lang = self.config.language;
         if self.daemon_online() {
             let sock = self.socket.clone();
-            self.spawn_action(move || ipc(&sock, &IpcRequest::Reload));
-        } else {
-            self.status_msg = "Configuración recargada (daemon offline)".into();
+            self.spawn_action(move || ipc(&sock, &IpcRequest::Reload, lang));
+        } else if load_ok {
+            self.status_msg = i18n::config_reloaded_offline(lang);
             self.status_ok = true;
         }
         self.poller.trigger();
@@ -367,7 +393,8 @@ impl NxctlApp {
     fn do_reapply(&mut self) {
         if self.daemon_online() {
             let sock = self.socket.clone();
-            self.spawn_action(move || ipc(&sock, &IpcRequest::Reapply));
+            let lang = self.config.language;
+            self.spawn_action(move || ipc(&sock, &IpcRequest::Reapply, lang));
         } else {
             self.apply_local(self.active_profile());
         }
@@ -376,17 +403,19 @@ impl NxctlApp {
     fn apply_local(&self, name: String) {
         let backend = self.backend.clone();
         let config = self.config.clone();
+        let lang = config.language;
         let dry = self.dry_run;
         let tx = self.action_tx.clone();
         let ctx = self.ctx.clone();
         thread::spawn(move || {
             let res = match apply_profile(backend.as_ref(), &config, &name, dry) {
                 Ok(r) => ActionResult {
-                    message: format!(
-                        "Perfil '{name}' aplicado: {} luces, {} ventiladores, {} avisos",
+                    message: i18n::fmt_profile_applied(
+                        lang,
+                        &name,
                         r.lighting_applied,
                         r.cooling_applied,
-                        r.warnings.len()
+                        r.warnings.len(),
                     ),
                     ok: true,
                     applied_profile: Some(name),
@@ -406,6 +435,7 @@ impl NxctlApp {
         if self.daemon_online() {
             let sock = self.socket.clone();
             let profile = name.to_string();
+            let lang = self.config.language;
             let tx = self.action_tx.clone();
             let ctx = self.ctx.clone();
             thread::spawn(move || {
@@ -414,6 +444,7 @@ impl NxctlApp {
                     &IpcRequest::SetProfile {
                         profile: profile.clone(),
                     },
+                    lang,
                 ) {
                     Ok(message) => ActionResult {
                         message,
@@ -455,27 +486,18 @@ impl NxctlApp {
     // ---------------------------------------------------------------- panels
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let lang = self.config.language;
+        let t = i18n::tr(lang);
         ui.add_space(8.0);
-        ui.label(
-            RichText::new("NXCTL // DAEMON")
-                .color(CYAN)
-                .strong()
-                .size(15.0),
-        );
-        ui.add_space(6.0);
-        let (txt, col) = if self.daemon_online() {
-            ("SYS OK", EMERALD)
-        } else {
-            ("OFFLINE", CRIMSON)
-        };
-        badge(ui, txt, col);
-        ui.add_space(18.0);
-        for (v, label) in View::ALL {
+        ui.label(RichText::new("NXCTL").color(CYAN).strong().size(15.0));
+        ui.add_space(14.0);
+        for v in View::ALL {
             let selected = self.view == v;
-            let text =
-                RichText::new(label)
-                    .size(14.0)
-                    .color(if selected { CYAN } else { TEXT_SECONDARY });
+            let text = RichText::new(v.label(lang)).size(14.0).color(if selected {
+                CYAN
+            } else {
+                TEXT_SECONDARY
+            });
             let btn = egui::Button::new(text)
                 .fill(if selected {
                     BG_CONTROL
@@ -495,27 +517,19 @@ impl NxctlApp {
                 self.view = v;
             }
         }
+        let mut selected_lang: Option<Language> = None;
+        let (daemon_txt, daemon_col) = if self.daemon_online() {
+            ("SYS OK", EMERALD)
+        } else {
+            ("OFFLINE", CRIMSON)
+        };
+
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.add_space(8.0);
-            let backend = match &self.snap.backend_error {
-                Some(_) => "liquidctl: error".to_string(),
-                None => format!("liquidctl: {} disp.", self.snap.devices.len()),
-            };
-            small_muted(ui, &backend);
-            small_muted(
-                ui,
-                &format!(
-                    "IPC: {}",
-                    self.socket.file_name().map_or_else(
-                        || self.socket.display().to_string(),
-                        |n| n.to_string_lossy().into_owned()
-                    )
-                ),
-            );
             if self.dry_run {
-                small_muted(ui, "MODO DRY-RUN");
+                small_muted(ui, t.dry_run_mode);
+                ui.add_space(4.0);
             }
-            ui.add_space(6.0);
             egui::Frame::new()
                 .fill(BG_CARD)
                 .stroke(egui::Stroke::new(1.0, BORDER_MUTED))
@@ -524,70 +538,119 @@ impl NxctlApp {
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        draw_shield_icon(ui, 13.0, EMERALD);
+                        draw_shield_icon(ui, 13.0, daemon_col);
                         ui.label(
-                            RichText::new("DAEMON WATCHDOG")
+                            RichText::new("DAEMON")
                                 .color(TEXT_SECONDARY)
                                 .size(11.0)
                                 .strong(),
                         );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            badge(ui, daemon_txt, daemon_col);
+                        });
                     });
-                    ui.add_space(3.0);
-                    match &self.snap.daemon {
-                        Some(d) => {
-                            kv(ui, "IPC", "CONECTADO");
-                            kv(ui, "Histéresis", &format!("{:.1}°C", d.hysteresis_celsius));
-                            kv(ui, "Intervalo", &format!("{} s", d.poll_interval_secs));
-                            kv(ui, "Delta mín.", &format!("{}%", d.min_duty_delta));
-                        }
-                        None => {
-                            kv(ui, "IPC", "DESCONECTADO");
-                            let d = &self.config.daemon;
-                            kv(ui, "Histéresis", &format!("{:.1}°C", d.hysteresis_celsius));
-                            kv(ui, "Intervalo", &format!("{} s", d.poll_interval_secs));
-                            kv(ui, "Delta mín.", &format!("{}%", d.min_duty_delta));
-                        }
-                    }
-                    ui.add_space(3.0);
+                    ui.add_space(8.0);
                     ui.label(
-                        RichText::new(&self.status_msg)
+                        RichText::new(t.language_label)
+                            .color(TEXT_SECONDARY)
                             .size(11.0)
-                            .color(if self.status_ok { EMERALD } else { AMBER }),
+                            .strong(),
                     );
+                    ui.add_space(4.0);
+                    let mut current_lang = lang;
+                    egui::ComboBox::from_id_salt("sidebar_language")
+                        .width(ui.available_width())
+                        .selected_text(current_lang.display_name())
+                        .show_ui(ui, |ui| {
+                            for option in Language::ALL {
+                                if ui
+                                    .selectable_value(
+                                        &mut current_lang,
+                                        option,
+                                        option.display_name(),
+                                    )
+                                    .changed()
+                                    && option != lang
+                                {
+                                    selected_lang = Some(option);
+                                }
+                            }
+                        });
+                    if !self.status_msg.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(&self.status_msg)
+                                .size(11.0)
+                                .color(if self.status_ok { EMERALD } else { AMBER }),
+                        );
+                    }
                 });
         });
+
+        if let Some(new_lang) = selected_lang {
+            self.config.language = new_lang;
+            self.save_and_reload_config(i18n::language_changed(new_lang));
+        }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let lang = self.config.language;
+        let t = i18n::tr(lang);
+        let active = self.active_profile();
+        let profile_names: Vec<String> = self.config.profiles.keys().cloned().collect();
+        let mut selected_to_apply: Option<String> = None;
         ui.horizontal_centered(|ui| {
             ui.add_space(12.0);
             let fmt = |v: Option<f32>| v.map_or("--".to_string(), |t| format!("{t:.0}°C"));
             ui.label(
-                RichText::new(format!(
-                    "CPU {}   GPU {}   NZXT {} disp.",
-                    fmt(self.snap.cpu_c),
-                    fmt(self.snap.gpu_c),
-                    self.snap.devices.len()
+                RichText::new(i18n::fmt_top_summary(
+                    lang,
+                    &fmt(self.snap.cpu_c),
+                    &fmt(self.snap.gpu_c),
+                    self.snap.devices.len(),
                 ))
                 .color(TEXT_SECONDARY)
                 .monospace(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(12.0);
-                if ui.button("Reaplicar").clicked() {
+                if ui.button(t.reapply).clicked() {
                     self.do_reapply();
                 }
-                if ui.button("Recargar").clicked() {
+                if ui.button(t.reload).clicked() {
                     self.do_reload();
                 }
-                badge(ui, &self.active_profile(), CYAN);
+                let mut current = active.clone();
+                egui::ComboBox::from_id_salt("topbar_quick_profile")
+                    .selected_text(RichText::new(&current).color(CYAN).strong())
+                    .show_ui(ui, |ui| {
+                        for name in &profile_names {
+                            if ui
+                                .selectable_value(&mut current, name.clone(), name)
+                                .changed()
+                            {
+                                selected_to_apply = Some(name.clone());
+                            }
+                        }
+                    });
+                ui.label(
+                    RichText::new(format!("{}:", t.quick_profile_title))
+                        .color(TEXT_SECONDARY)
+                        .size(11.0)
+                        .strong(),
+                );
             });
         });
+        if let Some(profile) = selected_to_apply {
+            self.apply_profile_named(&profile);
+        }
     }
 
     // ----------------------------------------------------------------- views
 
     fn dashboard(&mut self, ui: &mut egui::Ui) {
+        let lang = self.config.language;
+        let t = i18n::tr(lang);
         let snap = self.snap.clone();
         let empty_hist = VecDeque::new();
         let mut to_demote: Option<String> = None;
@@ -607,6 +670,7 @@ impl NxctlApp {
                             "PACKAGE",
                             CYAN,
                             &snap.cpu_history,
+                            t.demote,
                         ) {
                             to_demote = Some("cpu".into());
                         }
@@ -623,6 +687,7 @@ impl NxctlApp {
                             "NVIDIA",
                             MAGENTA,
                             &snap.gpu_history,
+                            t.demote,
                         ) {
                             to_demote = Some("gpu".into());
                         }
@@ -634,12 +699,13 @@ impl NxctlApp {
                                 ui,
                                 "aio",
                                 DashboardIcon::Pump,
-                                "AIO (Líquido)",
+                                t.aio_liquid,
                                 snap.liquid_c,
                                 100.0,
-                                "LÍQUIDO",
+                                t.liquid_sub,
                                 EMERALD,
                                 &snap.liquid_history,
+                                t.demote,
                             ) {
                                 to_demote = Some("aio".into());
                             }
@@ -648,7 +714,7 @@ impl NxctlApp {
                     }
                     _ => {
                         if let Some(s) = snap.hwmon.iter().find(|s| hwmon_sensor_id(s) == *id) {
-                            let (tag, accent) = classify_hwmon_sensor(&s.name);
+                            let (tag, accent) = classify_hwmon_sensor(&s.name, lang);
                             let icon = if tag == "iGPU" {
                                 DashboardIcon::Gpu
                             } else {
@@ -667,6 +733,7 @@ impl NxctlApp {
                                 tag,
                                 accent,
                                 hist,
+                                t.demote,
                             ) {
                                 to_demote = Some(id.clone());
                             }
@@ -681,10 +748,10 @@ impl NxctlApp {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     draw_fan_icon(ui, 15.0, CYAN);
-                    card_title(ui, "Headers PWM");
+                    card_title(ui, t.pwm_headers);
                 });
                 if snap.channels.is_empty() {
-                    small_muted(ui, "Sin canales NZXT detectados");
+                    small_muted(ui, t.no_nzxt_channels);
                 }
                 for c in &snap.channels {
                     let is_pump = is_pump_channel(&c.channel);
@@ -693,7 +760,7 @@ impl NxctlApp {
                 }
             });
             ui.add_space(8.0);
-            other_sensors_card(ui, &snap, &mut self.featured_sensors);
+            other_sensors_card(ui, &snap, &mut self.featured_sensors, lang);
         });
         if let Some(id) = to_demote {
             demote_sensor(&mut self.featured_sensors, &id);
@@ -701,12 +768,14 @@ impl NxctlApp {
     }
 
     fn fans(&mut self, ui: &mut egui::Ui) {
+        let lang = self.config.language;
+        let t = i18n::tr(lang);
         let snap = self.snap.clone();
         if snap.channels.is_empty() {
             card_frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                card_title(ui, "Ventiladores");
-                small_muted(ui, "Sin canales de ventilación detectados");
+                card_title(ui, t.nav_fans);
+                small_muted(ui, t.no_cooling_channels);
             });
             return;
         }
@@ -758,7 +827,11 @@ impl NxctlApp {
                                         }
                                     }
                                 });
-                            badge(ui, &format!("{} CANALES", channels.len()), header_accent);
+                            badge(
+                                ui,
+                                &i18n::fmt_channels_badge(lang, channels.len()),
+                                header_accent,
+                            );
                         });
                     });
 
@@ -791,36 +864,36 @@ impl NxctlApp {
                             .include_y(100.0)
                             .show(ui, |p| {
                                 p.line(
-                                    Line::new("Curva", PlotPoints::from(pts.clone()))
+                                    Line::new(t.curve, PlotPoints::from(pts.clone()))
                                         .color(header_accent)
                                         .width(2.0),
                                 );
                                 p.points(
-                                    Points::new("Nodos", PlotPoints::from(pts))
+                                    Points::new(t.nodes, PlotPoints::from(pts))
                                         .color(header_accent)
                                         .radius(3.0),
                                 );
-                                if let Some(t) = live {
-                                    let duty = evaluate_curve(curve, t);
-                                    p.vline(VLine::new("Temp", f64::from(t)).color(TEXT_MUTED));
+                                if let Some(temp) = live {
+                                    let duty = evaluate_curve(curve, temp);
+                                    p.vline(VLine::new("Temp", f64::from(temp)).color(TEXT_MUTED));
                                     p.hline(HLine::new("Duty", f64::from(duty)).color(TEXT_MUTED));
                                     p.points(
                                         Points::new(
-                                            "Operación",
-                                            PlotPoints::from(vec![[f64::from(t), f64::from(duty)]]),
+                                            t.operating,
+                                            PlotPoints::from(vec![[
+                                                f64::from(temp),
+                                                f64::from(duty),
+                                            ]]),
                                         )
                                         .color(AMBER)
                                         .radius(6.0),
                                     );
                                 }
                             });
-                        if let Some(t) = live {
+                        if let Some(temp) = live {
                             small_muted(
                                 ui,
-                                &format!(
-                                    "Punto operativo: {t:.1}°C → {}%",
-                                    evaluate_curve(curve, t)
-                                ),
+                                &i18n::fmt_operating_point(lang, temp, evaluate_curve(curve, temp)),
                             );
                         }
                     }
@@ -891,65 +964,309 @@ impl NxctlApp {
         });
     }
 
+    fn resolve_device_rgb(&self, snap: &Snapshot, dev: &str) -> (Vec<String>, Vec<String>) {
+        let mut channels: Vec<String> = snap
+            .lighting_info
+            .get(dev)
+            .filter(|info| !info.channels.is_empty())
+            .map(|info| info.channels.clone())
+            .unwrap_or_else(|| {
+                let mut dev_channels: Vec<String> =
+                    RGB_CHANNELS.iter().map(|s| (*s).to_string()).collect();
+                for p in self.config.profiles.values() {
+                    for l in &p.lighting {
+                        let matches = l.match_device.is_empty()
+                            || dev
+                                .to_ascii_lowercase()
+                                .contains(&l.match_device.to_ascii_lowercase())
+                            || l.match_device
+                                .to_ascii_lowercase()
+                                .contains(&dev.to_ascii_lowercase());
+                        if matches && !dev_channels.contains(&l.channel) {
+                            dev_channels.push(l.channel.clone());
+                        }
+                    }
+                }
+                dev_channels
+            });
+        if let Some(pos) = channels.iter().position(|c| c == "sync") {
+            let sync_ch = channels.remove(pos);
+            channels.insert(0, sync_ch);
+        }
+        let modes: Vec<String> = snap
+            .lighting_info
+            .get(dev)
+            .filter(|info| !info.modes.is_empty())
+            .map(|info| info.modes.clone())
+            .unwrap_or_else(|| RGB_MODES.iter().map(|s| (*s).to_string()).collect());
+        (channels, modes)
+    }
+
+    fn sync_rgb_rows(
+        &mut self,
+        snap: &Snapshot,
+        devices: &[String],
+        color: Color32,
+        mode_name: &str,
+    ) {
+        for dev in devices {
+            let (channels, modes) = self.resolve_device_rgb(snap, dev);
+            let mode_idx = modes
+                .iter()
+                .position(|m| m.eq_ignore_ascii_case(mode_name))
+                .unwrap_or(0);
+            for ch in channels {
+                let entry = self.rgb_per_channel.entry((dev.clone(), ch)).or_default();
+                entry.color = color;
+                entry.mode = mode_idx;
+            }
+        }
+    }
+
     fn rgb(&mut self, ui: &mut egui::Ui) {
+        let lang = self.config.language;
+        let t = i18n::tr(lang);
         let snap = self.snap.clone();
         let devices: Vec<String> = snap.devices.iter().map(|d| d.description.clone()).collect();
 
-        if devices.is_empty() {
-            card_frame().show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                card_title(ui, "Iluminación RGB");
-                small_muted(ui, "Sin dispositivos NZXT detectados");
-            });
-            return;
-        }
-
         let mut pending: Option<(String, String, String, Vec<String>)> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for dev in &devices {
-                let mut channels: Vec<String> = snap
-                    .lighting_info
-                    .get(dev)
-                    .filter(|info| !info.channels.is_empty())
-                    .map(|info| info.channels.clone())
-                    .unwrap_or_else(|| {
-                        let mut dev_channels: Vec<String> =
-                            RGB_CHANNELS.iter().map(|s| (*s).to_string()).collect();
-                        for p in self.config.profiles.values() {
-                            for l in &p.lighting {
-                                let matches = l.match_device.is_empty()
-                                    || dev
-                                        .to_ascii_lowercase()
-                                        .contains(&l.match_device.to_ascii_lowercase())
-                                    || l.match_device
-                                        .to_ascii_lowercase()
-                                        .contains(&dev.to_ascii_lowercase());
-                                if matches && !dev_channels.contains(&l.channel) {
-                                    dev_channels.push(l.channel.clone());
-                                }
-                            }
+            card_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    draw_palette_icon(ui, 15.0, MAGENTA);
+                    card_title(ui, "Pywal Sync");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.config.pywal.enabled {
+                            badge(ui, t.enabled, EMERALD);
+                        } else {
+                            badge(ui, t.disabled, TEXT_MUTED);
                         }
-                        dev_channels
                     });
-                // Place `sync` first as the device-wide master row when present.
-                if let Some(pos) = channels.iter().position(|c| c == "sync") {
-                    let sync_ch = channels.remove(pos);
-                    channels.insert(0, sync_ch);
+                });
+
+                let mut pywal_enabled = self.config.pywal.enabled;
+                let mut pywal_mode = if self.config.pywal.mode.trim().is_empty() {
+                    "fixed".to_string()
+                } else {
+                    self.config.pywal.mode.clone()
+                };
+                let mut mode_changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    if ui.checkbox(&mut pywal_enabled, t.pywal_auto_sync).changed() {
+                        self.config.pywal.enabled = pywal_enabled;
+                        self.save_and_reload_config(i18n::pywal_config_saved(lang));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        egui::ComboBox::from_id_salt("pywal_global_mode")
+                            .selected_text(&pywal_mode)
+                            .show_ui(ui, |ui| {
+                                for m in ["fixed", "breathing", "fading"] {
+                                    if ui
+                                        .selectable_value(&mut pywal_mode, m.to_string(), m)
+                                        .changed()
+                                    {
+                                        mode_changed = true;
+                                    }
+                                }
+                            });
+                        ui.label(
+                            RichText::new(t.global_mode)
+                                .size(12.0)
+                                .color(TEXT_SECONDARY),
+                        );
+                    });
+                });
+                if mode_changed {
+                    self.config.pywal.mode = pywal_mode.clone();
+                    self.save_and_reload_config(i18n::pywal_mode_changed(lang, &pywal_mode));
                 }
 
-                let modes: Vec<String> = snap
-                    .lighting_info
-                    .get(dev)
-                    .filter(|info| !info.modes.is_empty())
-                    .map(|info| info.modes.clone())
-                    .unwrap_or_else(|| RGB_MODES.iter().map(|s| (*s).to_string()).collect());
+                match load_pywal_palette(self.config.pywal.colors_path.as_deref().map(Path::new)) {
+                    Ok(palette) => {
+                        let mut filter_extremes = self.config.pywal.filter_extremes;
+                        let mut palette_changed = false;
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .checkbox(&mut filter_extremes, t.filter_extremes)
+                                .changed()
+                            {
+                                self.config.pywal.filter_extremes = filter_extremes;
+                                palette_changed = true;
+                            }
+                            let entries = active_palette_entries(
+                                &palette,
+                                self.config.pywal.filter_extremes,
+                                self.config.pywal.palette_offset,
+                            );
+                            let len = entries.len().max(1);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("+").clicked() {
+                                        self.config.pywal.palette_offset =
+                                            (self.config.pywal.palette_offset + 1) % len;
+                                        palette_changed = true;
+                                    }
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "+{}",
+                                            self.config.pywal.palette_offset % len
+                                        ))
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(CYAN),
+                                    );
+                                    if ui.small_button("-").clicked() {
+                                        self.config.pywal.palette_offset =
+                                            (self.config.pywal.palette_offset + len - 1) % len;
+                                        palette_changed = true;
+                                    }
+                                    ui.label(
+                                        RichText::new(t.shift_palette)
+                                            .size(11.0)
+                                            .color(TEXT_SECONDARY),
+                                    );
+                                    draw_palette_icon(ui, 13.0, CYAN);
+                                },
+                            );
+                        });
+                        if palette_changed {
+                            self.save_and_reload_config(i18n::pywal_palette_updated(lang));
+                        }
+
+                        let entries = active_palette_entries(
+                            &palette,
+                            self.config.pywal.filter_extremes,
+                            self.config.pywal.palette_offset,
+                        );
+
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if let Some(ref wp) = palette.wallpaper {
+                                let wp_name = Path::new(wp)
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or(wp);
+                                ui.label(
+                                    RichText::new(i18n::fmt_wallpaper(lang, wp_name))
+                                        .size(11.0)
+                                        .color(TEXT_SECONDARY),
+                                );
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button(t.sync_now).clicked() {
+                                        let primary_rgb = if !self.config.pywal.filter_extremes
+                                            && self.config.pywal.palette_offset == 0
+                                        {
+                                            palette
+                                                .color_rgb("color4")
+                                                .or_else(|| palette.color_rgb("color1"))
+                                        } else {
+                                            entries.first().map(|(_, _, rgb)| *rgb)
+                                        };
+                                        if let Some([r, g, b]) = primary_rgb {
+                                            let c = Color32::from_rgb(r, g, b);
+                                            self.sync_rgb_rows(&snap, &devices, c, &pywal_mode);
+                                        }
+                                        let backend = self.backend.clone();
+                                        let pywal_cfg = self.config.pywal.clone();
+                                        let pal = palette.clone();
+                                        let dry = self.dry_run;
+                                        self.spawn_action(move || {
+                                            let count = apply_pywal_palette(
+                                                &*backend, &pywal_cfg, &pal, dry,
+                                            )?;
+                                            Ok(i18n::fmt_pywal_synced(lang, count))
+                                        });
+                                    }
+                                },
+                            );
+                        });
+
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for (key, hex_str, [r, g, b]) in &entries {
+                                let color32 = Color32::from_rgb(*r, *g, *b);
+                                let (rect, resp) = ui.allocate_exact_size(
+                                    egui::vec2(22.0, 22.0),
+                                    egui::Sense::click(),
+                                );
+                                ui.painter().rect_filled(
+                                    rect,
+                                    egui::CornerRadius::same(3),
+                                    color32,
+                                );
+                                if resp.hovered() {
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        egui::CornerRadius::same(3),
+                                        egui::Stroke::new(1.5, Color32::WHITE),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                let resp = resp.on_hover_text(format!("{key}: #{hex_str}"));
+                                if resp.clicked() {
+                                    self.sync_rgb_rows(&snap, &devices, color32, &pywal_mode);
+                                    let backend = self.backend.clone();
+                                    let dry = self.dry_run;
+                                    let hex = hex_str.clone();
+                                    let devs = devices.clone();
+                                    let mode = pywal_mode.clone();
+                                    self.spawn_action(move || {
+                                        for d in &devs {
+                                            let _ = backend.set_color(
+                                                d,
+                                                "sync",
+                                                &mode,
+                                                std::slice::from_ref(&hex),
+                                                dry,
+                                            );
+                                        }
+                                        Ok(i18n::fmt_color_applied_all(lang, &hex, &mode))
+                                    });
+                                }
+                            }
+                        });
+                    }
+                    Err(_) => {
+                        ui.add_space(4.0);
+                        small_muted(ui, t.pywal_not_detected);
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+
+            if devices.is_empty() {
+                card_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    card_title(ui, t.nav_rgb);
+                    small_muted(ui, t.no_nzxt_devices);
+                });
+                return;
+            }
+
+            for dev in &devices {
+                let (channels, modes) = self.resolve_device_rgb(&snap, dev);
 
                 card_frame().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
+                        let is_aio = dev.to_ascii_lowercase().contains("kraken")
+                            || dev.to_ascii_lowercase().contains("corsair")
+                            || dev.to_ascii_lowercase().contains("aio");
+                        if is_aio {
+                            draw_pump_icon(ui, 15.0, CYAN);
+                        } else {
+                            draw_led_icon(ui, 15.0, MAGENTA);
+                        }
                         card_title(ui, dev);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            badge(ui, &format!("{} CANALES", channels.len()), MAGENTA);
+                            badge(ui, &i18n::fmt_channels_badge(lang, channels.len()), MAGENTA);
                         });
                     });
 
@@ -972,8 +1289,16 @@ impl NxctlApp {
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.horizontal(|ui| {
+                                    let ch_lower = ch.to_ascii_lowercase();
+                                    if is_sync {
+                                        draw_sync_icon(ui, 14.0, state.color);
+                                    } else if ch_lower.contains("ring") {
+                                        draw_ring_icon(ui, 14.0, state.color);
+                                    } else {
+                                        draw_led_icon(ui, 14.0, state.color);
+                                    }
                                     let label = if is_sync {
-                                        "sync (todo el dispositivo)".to_string()
+                                        t.sync_whole_device.to_string()
                                     } else {
                                         ch.clone()
                                     };
@@ -986,7 +1311,7 @@ impl NxctlApp {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            if ui.button("Aplicar").clicked() {
+                                            if ui.button(t.apply).clicked() {
                                                 let c = state.color;
                                                 let hex = format!(
                                                     "{:02x}{:02x}{:02x}",
@@ -1036,12 +1361,16 @@ impl NxctlApp {
             let dry = self.dry_run;
             self.spawn_action(move || {
                 backend.set_color(&dev_name, &ch, &mode_str, &colors, dry)?;
-                Ok(format!("{dev_name}/{ch}: {mode_str} aplicado"))
+                Ok(i18n::fmt_channel_mode_applied(
+                    lang, &dev_name, &ch, &mode_str,
+                ))
             });
         }
     }
 
     fn profiles(&mut self, ui: &mut egui::Ui) {
+        let lang = self.config.language;
+        let t = i18n::tr(lang);
         let active = self.active_profile();
         let curve_names: Vec<String> = self.config.curves.keys().cloned().collect();
 
@@ -1049,7 +1378,7 @@ impl NxctlApp {
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
-                if ui.button("+ Nuevo perfil").clicked() {
+                if ui.button(t.new_profile).clicked() {
                     self.show_new_profile = !self.show_new_profile;
                     if self.show_new_profile {
                         self.new_profile_name.clear();
@@ -1057,30 +1386,30 @@ impl NxctlApp {
                         self.draft_profile = self.capture_current_profile();
                     }
                 }
-                if ui.button("Guardar config").clicked() {
-                    self.save_and_reload_config("Configuración guardada".to_string());
+                if ui.button(t.save_config).clicked() {
+                    self.save_and_reload_config(i18n::config_saved(lang));
                 }
                 ui.separator();
-                ui.label("Importar (.toml):");
+                ui.label(t.import_toml);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.import_path)
                         .desired_width(240.0)
-                        .hint_text("/ruta/al/perfil.toml"),
+                        .hint_text(t.import_hint),
                 );
-                if ui.button("Cargar").clicked() {
+                if ui.button(t.load).clicked() {
                     let path = self.import_path.trim().to_string();
                     if path.is_empty() {
-                        self.status_msg = "Indica una ruta de perfil para importar".into();
+                        self.status_msg = i18n::profile_import_path_empty(lang);
                         self.status_ok = false;
                     } else {
                         match self.config.import_profile(Path::new(&path), true) {
                             Ok(imported) => {
-                                self.save_and_reload_config(format!(
-                                    "Perfil '{imported}' importado y guardado"
+                                self.save_and_reload_config(i18n::profile_imported(
+                                    lang, &imported,
                                 ));
                             }
                             Err(e) => {
-                                self.status_msg = format!("Error importando perfil: {e}");
+                                self.status_msg = i18n::profile_import_error(lang, &e);
                                 self.status_ok = false;
                             }
                         }
@@ -1097,36 +1426,33 @@ impl NxctlApp {
             card_frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    card_title(ui, "Editor de perfil");
+                    card_title(ui, t.profile_editor);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Capturar estado actual").clicked() {
+                        if ui.button(t.capture_current_state).clicked() {
                             capture_requested = true;
                         }
                     });
                 });
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label("Nombre:");
+                    ui.label(t.name_label);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_profile_name)
                             .desired_width(180.0)
-                            .hint_text("mi_perfil"),
+                            .hint_text(t.profile_name_hint),
                     );
-                    ui.label("Descripción:");
+                    ui.label(t.description_label);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_profile_desc)
                             .desired_width(260.0)
-                            .hint_text("Opcional"),
+                            .hint_text(t.optional_hint),
                     );
                 });
 
                 ui.add_space(6.0);
                 small_muted(
                     ui,
-                    &format!(
-                        "Reglas de refrigeración ({}):",
-                        self.draft_profile.cooling.len()
-                    ),
+                    &i18n::fmt_cooling_rules_header(lang, self.draft_profile.cooling.len()),
                 );
                 for (idx, rule) in self.draft_profile.cooling.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
@@ -1136,13 +1462,13 @@ impl NxctlApp {
                                 .color(TEXT_PRIMARY),
                         );
                         let is_curve = matches!(rule.target, CoolingTarget::Curve { .. });
-                        if ui.selectable_label(!is_curve, "Fijo").clicked() && is_curve {
+                        if ui.selectable_label(!is_curve, t.fixed).clicked() && is_curve {
                             rule.target = CoolingTarget::Fixed { duty: 50 };
                         }
                         if ui
                             .add_enabled(
                                 !curve_names.is_empty(),
-                                egui::Button::selectable(is_curve, "Curva"),
+                                egui::Button::selectable(is_curve, t.curve),
                             )
                             .clicked()
                             && !is_curve
@@ -1179,10 +1505,7 @@ impl NxctlApp {
                 ui.add_space(6.0);
                 small_muted(
                     ui,
-                    &format!(
-                        "Reglas de iluminación ({}):",
-                        self.draft_profile.lighting.len()
-                    ),
+                    &i18n::fmt_lighting_rules_header(lang, self.draft_profile.lighting.len()),
                 );
                 for rule in &self.draft_profile.lighting {
                     let color_txt = if rule.colors.is_empty() {
@@ -1201,10 +1524,10 @@ impl NxctlApp {
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Guardar perfil").clicked() {
+                    if ui.button(t.save_profile).clicked() {
                         save_requested = true;
                     }
-                    if ui.button("Cancelar").clicked() {
+                    if ui.button(t.cancel).clicked() {
                         self.show_new_profile = false;
                     }
                 });
@@ -1217,7 +1540,7 @@ impl NxctlApp {
             if save_requested {
                 let name = self.new_profile_name.trim().to_string();
                 if name.is_empty() {
-                    self.status_msg = "El nombre del perfil no puede estar vacío".into();
+                    self.status_msg = i18n::profile_name_empty(lang);
                     self.status_ok = false;
                 } else {
                     let mut profile = self.draft_profile.clone();
@@ -1229,7 +1552,7 @@ impl NxctlApp {
                     };
                     self.config.profiles.insert(name.clone(), profile);
                     self.show_new_profile = false;
-                    self.save_and_reload_config(format!("Perfil '{name}' guardado"));
+                    self.save_and_reload_config(i18n::profile_saved(lang, &name));
                 }
             }
         }
@@ -1252,31 +1575,31 @@ impl NxctlApp {
                     ui.horizontal(|ui| {
                         card_title(ui, name);
                         if *name == active {
-                            badge(ui, "ACTIVO", EMERALD);
+                            badge(ui, t.active, EMERALD);
                         }
                         if is_default {
                             badge(ui, "DEFAULT", CYAN);
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
-                                .add_enabled(can_delete, egui::Button::new("Eliminar"))
+                                .add_enabled(can_delete, egui::Button::new(t.delete))
                                 .clicked()
                             {
                                 to_delete = Some(name.clone());
                             }
-                            if ui.button("Clonar").clicked() {
+                            if ui.button(t.clone).clicked() {
                                 to_clone = Some((name.clone(), p.clone()));
                             }
-                            if ui.button("Exportar").clicked() {
+                            if ui.button(t.export).clicked() {
                                 to_export = Some(name.clone());
                             }
                             if ui
-                                .add_enabled(!is_default, egui::Button::new("Hacer default"))
+                                .add_enabled(!is_default, egui::Button::new(t.set_default))
                                 .clicked()
                             {
                                 to_set_default = Some(name.clone());
                             }
-                            if ui.button("Aplicar").clicked() {
+                            if ui.button(t.apply).clicked() {
                                 to_apply = Some(name.clone());
                             }
                         });
@@ -1286,11 +1609,7 @@ impl NxctlApp {
                     }
                     small_muted(
                         ui,
-                        &format!(
-                            "{} reglas de iluminación · {} reglas de refrigeración",
-                            p.lighting.len(),
-                            p.cooling.len()
-                        ),
+                        &i18n::fmt_profile_rules_summary(lang, p.lighting.len(), p.cooling.len()),
                     );
                 });
                 ui.add_space(8.0);
@@ -1302,31 +1621,31 @@ impl NxctlApp {
         }
         if let Some(n) = to_set_default {
             self.config.default_profile = n.clone();
-            self.save_and_reload_config(format!("'{n}' establecido como perfil por defecto"));
+            self.save_and_reload_config(i18n::default_profile_set(lang, &n));
         }
         if let Some(n) = to_export {
             let path = Path::new(&self.export_dir).join(format!("{n}.toml"));
             match self.config.export_profile(&n, &path) {
                 Ok(()) => {
                     self.import_path = path.display().to_string();
-                    self.status_msg = format!("Perfil '{n}' exportado a {}", self.import_path);
+                    self.status_msg = i18n::profile_exported(lang, &n, &self.import_path);
                     self.status_ok = true;
                 }
                 Err(e) => {
-                    self.status_msg = format!("Error exportando perfil '{n}': {e}");
+                    self.status_msg = i18n::profile_export_error(lang, &n, &e);
                     self.status_ok = false;
                 }
             }
         }
         if let Some((orig, profile)) = to_clone {
-            self.new_profile_name = format!("{orig}_copia");
+            self.new_profile_name = i18n::fmt_cloned_profile_name(lang, &orig);
             self.new_profile_desc = profile.description.clone().unwrap_or_default();
             self.draft_profile = profile;
             self.show_new_profile = true;
         }
         if let Some(n) = to_delete {
             self.config.profiles.remove(&n);
-            self.save_and_reload_config(format!("Perfil '{n}' eliminado"));
+            self.save_and_reload_config(i18n::profile_deleted(lang, &n));
         }
     }
 }
@@ -1374,10 +1693,12 @@ impl eframe::App for NxctlApp {
 
 // --------------------------------------------------------------- UI helpers
 
-fn ipc(socket: &std::path::Path, req: &IpcRequest) -> anyhow::Result<String> {
+fn ipc(socket: &std::path::Path, req: &IpcRequest, lang: Language) -> anyhow::Result<String> {
     match send_request(socket, req)? {
         IpcResponse::Ok { message } => Ok(message),
-        IpcResponse::Status { daemon } => Ok(format!("perfil activo: {}", daemon.active_profile)),
+        IpcResponse::Status { daemon } => {
+            Ok(i18n::fmt_ipc_active_profile(lang, &daemon.active_profile))
+        }
         IpcResponse::Error { message } => Err(anyhow!(message)),
     }
 }
@@ -1405,15 +1726,6 @@ fn card_title(ui: &mut egui::Ui, text: &str) {
 
 fn small_muted(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).color(TEXT_MUTED).size(11.0));
-}
-
-fn kv(ui: &mut egui::Ui, k: &str, v: &str) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(k).color(TEXT_SECONDARY));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(v).color(TEXT_PRIMARY).monospace());
-        });
-    });
 }
 
 #[derive(Clone, Copy)]
@@ -1444,6 +1756,7 @@ fn temp_card(
     sub: &str,
     accent: Color32,
     history: &VecDeque<f64>,
+    demote_label: &str,
 ) -> bool {
     let mut demote = false;
     card_frame().show(ui, |ui| {
@@ -1452,7 +1765,7 @@ fn temp_card(
             draw_dashboard_icon(ui, icon, 15.0, accent);
             card_title(ui, title);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Al listado").clicked() {
+                if ui.small_button(demote_label).clicked() {
                     demote = true;
                 }
             });
@@ -1492,7 +1805,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("NXCTL // DAEMON")
+            .with_title("NXCTL")
             .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([900.0, 600.0]),
         ..Default::default()
@@ -1506,7 +1819,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Classifies a `hwmon` driver name into a friendly category label and accent color.
-fn classify_hwmon_sensor(name: &str) -> (&'static str, Color32) {
+fn classify_hwmon_sensor(name: &str, lang: Language) -> (&'static str, Color32) {
     let lower = name.to_ascii_lowercase();
     if lower.contains("spd5118") || lower.contains("jc42") || lower.contains("ddr") {
         ("RAM", CYAN)
@@ -1527,7 +1840,7 @@ fn classify_hwmon_sensor(name: &str) -> (&'static str, Color32) {
         || lower.contains("e1000")
         || lower.contains("eth")
     {
-        ("RED", EMERALD)
+        (i18n::tr(lang).net_tag, EMERALD)
     } else {
         ("SYS", TEXT_SECONDARY)
     }
@@ -1566,6 +1879,7 @@ fn compact_sensor_row(
     name: &str,
     sub: &str,
     temp: Option<f32>,
+    feature_label: &str,
 ) -> bool {
     let mut promote = false;
     let temp_color = match temp {
@@ -1584,7 +1898,7 @@ fn compact_sensor_row(
                 .size(11.0),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("Destacar").clicked() {
+            if ui.small_button(feature_label).clicked() {
                 promote = true;
             }
             let txt = temp.map_or_else(|| "-- °C".to_string(), |t| format!("{t:.1} °C"));
@@ -1594,7 +1908,13 @@ fn compact_sensor_row(
     promote
 }
 
-fn other_sensors_card(ui: &mut egui::Ui, snap: &Snapshot, featured: &mut Vec<String>) {
+fn other_sensors_card(
+    ui: &mut egui::Ui,
+    snap: &Snapshot,
+    featured: &mut Vec<String>,
+    lang: Language,
+) {
+    let t = i18n::tr(lang);
     let show_cpu = !is_featured(featured, "cpu");
     let show_gpu = !is_featured(featured, "gpu");
     let show_aio = snap.liquid_c.is_some() && !is_featured(featured, "aio");
@@ -1614,13 +1934,13 @@ fn other_sensors_card(ui: &mut egui::Ui, snap: &Snapshot, featured: &mut Vec<Str
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             draw_sensor_icon(ui, 15.0, CYAN);
-            card_title(ui, "Otros Sensores (RAM / SSD / Sistema)");
+            card_title(ui, t.other_sensors);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 badge(ui, &format!("{total}"), CYAN);
             });
         });
         if total == 0 {
-            small_muted(ui, "Sin sensores adicionales detectados");
+            small_muted(ui, t.no_additional_sensors);
             return;
         }
         if show_cpu
@@ -1632,6 +1952,7 @@ fn other_sensors_card(ui: &mut egui::Ui, snap: &Snapshot, featured: &mut Vec<Str
                 "CPU",
                 "PACKAGE",
                 snap.cpu_c,
+                t.feature,
             )
         {
             to_promote = Some("cpu".into());
@@ -1645,6 +1966,7 @@ fn other_sensors_card(ui: &mut egui::Ui, snap: &Snapshot, featured: &mut Vec<Str
                 "GPU",
                 "NVIDIA",
                 snap.gpu_c,
+                t.feature,
             )
         {
             to_promote = Some("gpu".into());
@@ -1656,21 +1978,31 @@ fn other_sensors_card(ui: &mut egui::Ui, snap: &Snapshot, featured: &mut Vec<Str
                 "AIO",
                 EMERALD,
                 "AIO",
-                "Líquido",
+                t.liquid_label,
                 snap.liquid_c,
+                t.feature,
             )
         {
             to_promote = Some("aio".into());
         }
         for (s, id) in secondary {
-            let (tag, tag_color) = classify_hwmon_sensor(&s.name);
+            let (tag, tag_color) = classify_hwmon_sensor(&s.name, lang);
             let icon = if tag == "iGPU" {
                 DashboardIcon::Gpu
             } else {
                 DashboardIcon::Sensor
             };
             let label = s.label.as_deref().unwrap_or(&s.input_file);
-            if compact_sensor_row(ui, icon, tag, tag_color, &s.name, label, Some(s.temp_c)) {
+            if compact_sensor_row(
+                ui,
+                icon,
+                tag,
+                tag_color,
+                &s.name,
+                label,
+                Some(s.temp_c),
+                t.feature,
+            ) {
                 to_promote = Some(id);
             }
         }
@@ -1705,13 +2037,23 @@ mod liquid_tests {
 
     #[test]
     fn classifies_and_filters_secondary_hwmon_sensors() {
-        assert_eq!(classify_hwmon_sensor("spd5118").0, "RAM");
-        assert_eq!(classify_hwmon_sensor("nvme").0, "SSD");
-        assert_eq!(classify_hwmon_sensor("drivetemp").0, "HDD");
-        assert_eq!(classify_hwmon_sensor("amdgpu").0, "iGPU");
-        assert_eq!(classify_hwmon_sensor("mt7921_phy0").0, "WI-FI");
-        assert_eq!(classify_hwmon_sensor("r8169_0_c00:00").0, "RED");
-        assert_eq!(classify_hwmon_sensor("prom21_xhci").0, "SYS");
+        assert_eq!(classify_hwmon_sensor("spd5118", Language::Es).0, "RAM");
+        assert_eq!(classify_hwmon_sensor("nvme", Language::Es).0, "SSD");
+        assert_eq!(classify_hwmon_sensor("drivetemp", Language::Es).0, "HDD");
+        assert_eq!(classify_hwmon_sensor("amdgpu", Language::Es).0, "iGPU");
+        assert_eq!(
+            classify_hwmon_sensor("mt7921_phy0", Language::Es).0,
+            "WI-FI"
+        );
+        assert_eq!(
+            classify_hwmon_sensor("r8169_0_c00:00", Language::Es).0,
+            "RED"
+        );
+        assert_eq!(
+            classify_hwmon_sensor("r8169_0_c00:00", Language::En).0,
+            "NET"
+        );
+        assert_eq!(classify_hwmon_sensor("prom21_xhci", Language::Es).0, "SYS");
 
         let sensors = [
             sensor("k10temp", 45.0),
@@ -1723,6 +2065,30 @@ mod liquid_tests {
         assert_eq!(secondary.len(), 2);
         assert_eq!(secondary[0].name, "nvme");
         assert_eq!(secondary[1].name, "spd5118");
+    }
+
+    #[test]
+    fn cli_parses_lang_flag() {
+        let cli_default = Cli::try_parse_from(["nxctl-gui"]).expect("default cli");
+        assert_eq!(cli_default.lang, None);
+
+        let cli_en = Cli::try_parse_from(["nxctl-gui", "--lang", "en"]).expect("--lang en");
+        assert_eq!(cli_en.lang, Some(Language::En));
+
+        let cli_es = Cli::try_parse_from(["nxctl-gui", "--lang", "es"]).expect("--lang es");
+        assert_eq!(cli_es.lang, Some(Language::Es));
+    }
+
+    #[test]
+    fn view_labels_are_localized() {
+        assert_eq!(View::Dashboard.label(Language::Es), "Dashboard");
+        assert_eq!(View::Dashboard.label(Language::En), "Dashboard");
+        assert_eq!(View::Fans.label(Language::Es), "Ventiladores");
+        assert_eq!(View::Fans.label(Language::En), "Fans");
+        assert_eq!(View::Rgb.label(Language::Es), "Iluminación RGB");
+        assert_eq!(View::Rgb.label(Language::En), "RGB Lighting");
+        assert_eq!(View::Profiles.label(Language::Es), "Perfiles");
+        assert_eq!(View::Profiles.label(Language::En), "Profiles");
     }
 
     #[test]

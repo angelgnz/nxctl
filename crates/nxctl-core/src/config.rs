@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
+use crate::i18n::Language;
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 2;
 const DEFAULT_HYSTERESIS_CELSIUS: f32 = 2.0;
@@ -26,16 +27,74 @@ fn default_reapply_on_resume() -> bool {
     true
 }
 
+fn default_pywal_channel() -> String {
+    "sync".to_string()
+}
+
+fn default_pywal_color_key() -> String {
+    "color4".to_string()
+}
+
+fn default_pywal_mode() -> String {
+    "fixed".to_string()
+}
+
 /// Top-level nxctl configuration stored as TOML.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub default_profile: String,
     #[serde(default)]
+    pub language: Language,
+    #[serde(default)]
     pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub pywal: PywalConfig,
     #[serde(default)]
     pub curves: BTreeMap<String, FanCurve>,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
+}
+
+/// Target device and color key mapping for pywal synchronization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PywalTarget {
+    pub match_device: String,
+    #[serde(default = "default_pywal_channel")]
+    pub channel: String,
+    #[serde(default = "default_pywal_color_key")]
+    pub color_key: String,
+    #[serde(default = "default_pywal_mode")]
+    pub mode: String,
+}
+
+/// Optional pywal (`~/.cache/wal/colors.json`) synchronization configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PywalConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub colors_path: Option<String>,
+    #[serde(default = "default_pywal_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub filter_extremes: bool,
+    #[serde(default)]
+    pub palette_offset: usize,
+    #[serde(default)]
+    pub targets: Vec<PywalTarget>,
+}
+
+impl Default for PywalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            colors_path: None,
+            mode: default_pywal_mode(),
+            filter_extremes: false,
+            palette_offset: 0,
+            targets: Vec::new(),
+        }
+    }
 }
 
 /// Daemon polling and hysteresis settings.
@@ -434,6 +493,7 @@ impl Config {
 
         Self {
             default_profile: "default".to_string(),
+            language: Language::Es,
             daemon: DaemonConfig {
                 temp_sensor: Some(TempSensorRef::Liquidctl {
                     match_device: "kraken".to_string(),
@@ -441,6 +501,7 @@ impl Config {
                 }),
                 ..DaemonConfig::default()
             },
+            pywal: PywalConfig::default(),
             curves,
             profiles,
         }
@@ -596,10 +657,12 @@ impl Config {
 
         Self {
             default_profile: "default".to_string(),
+            language: Language::Es,
             daemon: DaemonConfig {
                 temp_sensor,
                 ..DaemonConfig::default()
             },
+            pywal: PywalConfig::default(),
             curves,
             profiles,
         }
@@ -1156,5 +1219,59 @@ cooling = []
         assert_eq!(reimported, "custom");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pywal_config_is_optional_and_uses_defaults() {
+        let minimal_toml = r#"
+default_profile = "default"
+"#;
+        let cfg: Config = toml::from_str(minimal_toml).expect("existing toml without pywal");
+        assert!(!cfg.pywal.enabled);
+        assert_eq!(cfg.pywal.colors_path, None);
+        assert!(cfg.pywal.targets.is_empty());
+
+        let with_pywal = r#"
+default_profile = "default"
+
+[pywal]
+enabled = true
+colors_path = "/tmp/wal/colors.json"
+
+[[pywal.targets]]
+match_device = "kraken"
+"#;
+        let cfg2: Config = toml::from_str(with_pywal).expect("toml with pywal");
+        assert!(cfg2.pywal.enabled);
+        assert_eq!(
+            cfg2.pywal.colors_path.as_deref(),
+            Some("/tmp/wal/colors.json")
+        );
+        assert_eq!(cfg2.pywal.targets.len(), 1);
+        assert_eq!(cfg2.pywal.targets[0].match_device, "kraken");
+        assert_eq!(cfg2.pywal.targets[0].channel, "sync");
+        assert_eq!(cfg2.pywal.targets[0].color_key, "color4");
+        assert_eq!(cfg2.pywal.targets[0].mode, "fixed");
+    }
+
+    #[test]
+    fn language_defaults_to_es_and_roundtrips_en() {
+        let without_language = r#"
+default_profile = "default"
+"#;
+        let cfg: Config = toml::from_str(without_language).expect("toml without language");
+        assert_eq!(cfg.language, Language::Es);
+
+        let with_en = r#"
+default_profile = "default"
+language = "en"
+"#;
+        let cfg_en: Config = toml::from_str(with_en).expect("toml with language = en");
+        assert_eq!(cfg_en.language, Language::En);
+
+        let serialized = toml::to_string(&cfg_en).expect("serialize config");
+        assert!(serialized.contains("language = \"en\""));
+        let roundtripped: Config = toml::from_str(&serialized).expect("roundtrip config");
+        assert_eq!(roundtripped.language, Language::En);
     }
 }

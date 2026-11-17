@@ -6,13 +6,14 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
+use crate::i18n;
 use anyhow::Result;
 use nxctl_core::config::Config;
 use nxctl_core::engine::apply_profile;
 use nxctl_core::liquidctl::{CliLiquidctlBackend, DeviceStatus, LiquidctlBackend};
 use nxctl_core::{
-    DaemonStatus, HwmonSensorInfo, IpcRequest, IpcResponse, NvidiaGpuInfo, evaluate_curve,
-    list_hwmon_sensors, list_nvidia_gpus, send_request,
+    DaemonStatus, HwmonSensorInfo, IpcRequest, IpcResponse, Language, NvidiaGpuInfo,
+    evaluate_curve, list_hwmon_sensors, list_nvidia_gpus, send_request,
 };
 use ratatui::Frame;
 use ratatui::Terminal;
@@ -95,6 +96,7 @@ fn gpu_temp(s: &TuiSnapshot) -> Option<f32> {
 #[derive(Debug, Clone)]
 pub struct TuiState {
     pub config: Config,
+    pub lang: Language,
     pub profile_names: Vec<String>,
     pub selected_profile: usize,
     pub snapshot: TuiSnapshot,
@@ -113,6 +115,7 @@ pub struct TuiState {
 
 impl TuiState {
     pub fn new(config: Config, dry_run: bool, socket_path: PathBuf) -> Self {
+        let lang = config.language;
         let profile_names: Vec<String> = config.profiles.keys().cloned().collect();
         let curve_names: Vec<String> = config.curves.keys().cloned().collect();
         let selected_profile = profile_names
@@ -121,6 +124,7 @@ impl TuiState {
             .unwrap_or(0);
         Self {
             config,
+            lang,
             profile_names,
             selected_profile,
             snapshot: TuiSnapshot::default(),
@@ -335,6 +339,12 @@ fn map_key(state: &mut TuiState, key: KeyEvent) -> KeyAction {
             state.next_curve();
             KeyAction::None
         }
+        KeyCode::Char('l') => {
+            state.lang = state.lang.toggle();
+            state.config.language = state.lang;
+            state.status_message = Some(i18n::fmt_language_changed(state.lang));
+            KeyAction::None
+        }
         KeyCode::Enter | KeyCode::Char('a') => KeyAction::Apply,
         KeyCode::Char('r') => KeyAction::Refresh,
         _ => KeyAction::None,
@@ -342,8 +352,9 @@ fn map_key(state: &mut TuiState, key: KeyEvent) -> KeyAction {
 }
 
 fn apply_selected(state: &mut TuiState, backend: &CliLiquidctlBackend) {
+    let s = i18n::tui(state.lang);
     let Some(name) = state.selected_name().map(str::to_string) else {
-        state.status_message = Some("sin perfiles".into());
+        state.status_message = Some(s.no_profiles.into());
         return;
     };
     let connected = state.snapshot.daemon.is_some();
@@ -354,32 +365,37 @@ fn apply_selected(state: &mut TuiState, backend: &CliLiquidctlBackend) {
                 profile: name.clone(),
             },
         ) {
-            Ok(IpcResponse::Ok { message }) => format!("perfil '{name}': {message}"),
-            Ok(IpcResponse::Error { message }) => format!("error: {message}"),
-            Ok(_) => format!("perfil '{name}' enviado"),
-            Err(e) => format!("error IPC: {e}"),
+            Ok(IpcResponse::Ok { message }) => {
+                i18n::fmt_tui_profile_ipc_ok(state.lang, &name, &message)
+            }
+            Ok(IpcResponse::Error { message }) => i18n::fmt_tui_error(state.lang, &message),
+            Ok(_) => i18n::fmt_tui_profile_sent(state.lang, &name),
+            Err(e) => i18n::fmt_tui_ipc_error(state.lang, &e),
         }
     } else {
         match apply_profile(backend, &state.config, &name, state.dry_run) {
-            Ok(r) => format!(
-                "perfil '{name}' aplicado: {} iluminación, {} refrigeración",
-                r.lighting_applied, r.cooling_applied
+            Ok(r) => i18n::fmt_tui_profile_applied(
+                state.lang,
+                &name,
+                r.lighting_applied,
+                r.cooling_applied,
             ),
-            Err(e) => format!("error: {e}"),
+            Err(e) => i18n::fmt_tui_error(state.lang, &e),
         }
     });
 }
 
 fn reload_daemon(state: &mut TuiState) {
+    let s = i18n::tui(state.lang);
     state.status_message = Some(if state.snapshot.daemon.is_some() && !state.dry_run {
         match send_request(&state.socket_path, &IpcRequest::Reload) {
             Ok(IpcResponse::Ok { message }) => message,
-            Ok(IpcResponse::Error { message }) => format!("error: {message}"),
-            Ok(_) => "recargado".into(),
-            Err(e) => format!("error IPC: {e}"),
+            Ok(IpcResponse::Error { message }) => i18n::fmt_tui_error(state.lang, &message),
+            Ok(_) => s.reloaded.into(),
+            Err(e) => i18n::fmt_tui_ipc_error(state.lang, &e),
         }
     } else {
-        "actualizando…".into()
+        s.refreshing.into()
     });
 }
 
@@ -486,7 +502,10 @@ fn centered_rect(w: u16, h: u16, area: Rect) -> Rect {
 }
 
 fn draw_history(frame: &mut Frame, state: &TuiState, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title("Historial °C");
+    let s = i18n::tui(state.lang);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(s.history_title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let rows = Layout::default()
@@ -528,15 +547,16 @@ fn draw_history(frame: &mut Frame, state: &TuiState, area: Rect) {
 }
 
 fn draw_devices(frame: &mut Frame, state: &TuiState, area: Rect) {
+    let s = i18n::tui(state.lang);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("Dispositivos NZXT (liquidctl)");
+        .title(s.devices_title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let mut lines: Vec<Line> = Vec::new();
     let mut gauges: Vec<(String, f64)> = Vec::new();
     if state.snapshot.devices.is_empty() {
-        lines.push(Line::from("(sin dispositivos)"));
+        lines.push(Line::from(s.no_devices));
     }
     for dev in &state.snapshot.devices {
         lines.push(Line::from(Span::styled(
@@ -600,6 +620,7 @@ fn draw_sensors(frame: &mut Frame, state: &mut TuiState, area: Rect) {
             ),
         ]));
     }
+    let s = i18n::tui(state.lang);
     let table = Table::new(
         rows,
         [
@@ -608,15 +629,9 @@ fn draw_sensors(frame: &mut Frame, state: &mut TuiState, area: Rect) {
             Constraint::Percentage(25),
         ],
     )
-    .header(
-        Row::new(["Dispositivo", "Sensor", "Temp"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-    )
+    .header(Row::new(s.sensors_headers).style(Style::default().add_modifier(Modifier::BOLD)))
     .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-    .block(panel_block(
-        "Sensores (hwmon / NVIDIA)",
-        state.focus == Focus::Sensors,
-    ));
+    .block(panel_block(s.sensors_title, state.focus == Focus::Sensors));
     frame.render_stateful_widget(table, area, &mut state.sensor_state);
 }
 
@@ -668,10 +683,11 @@ fn draw_curves(frame: &mut Frame, state: &TuiState, area: Rect) {
             .style(Style::default().fg(Color::Cyan))
             .data(&pts),
     ];
+    let s = i18n::tui(state.lang);
     if !op.is_empty() {
         datasets.push(
             Dataset::default()
-                .name("actual")
+                .name(s.curve_current_label)
                 .marker(symbols::Marker::Block)
                 .graph_type(GraphType::Scatter)
                 .style(Style::default().fg(Color::Red))
@@ -684,7 +700,7 @@ fn draw_curves(frame: &mut Frame, state: &TuiState, area: Rect) {
         .chain(op.iter().map(|p| p.0))
         .fold(100.0_f64, f64::max);
     let chart = Chart::new(datasets)
-        .block(Block::default().borders(Borders::ALL).title("Curvas (c)"))
+        .block(Block::default().borders(Borders::ALL).title(s.curves_title))
         .x_axis(
             Axis::default()
                 .title("°C")
@@ -700,20 +716,9 @@ fn draw_curves(frame: &mut Frame, state: &TuiState, area: Rect) {
     frame.render_widget(chart, parts[1]);
 }
 
-const HELP_LINES: [&str; 9] = [
-    "q / Ctrl+C   salir",
-    "Esc          salir / cerrar ayuda",
-    "Tab          cambiar foco Perfiles ↔ Sensores",
-    "↑/↓  j/k     desplazar panel enfocado",
-    "Enter / a    aplicar perfil",
-    "c            siguiente curva",
-    "r            recargar / actualizar",
-    "?            mostrar/ocultar ayuda",
-    "",
-];
-
 /// Dibuja la interfaz completa.
 pub fn draw(frame: &mut Frame, state: &mut TuiState) {
+    let s = i18n::tui(state.lang);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -730,14 +735,16 @@ pub fn draw(frame: &mut Frame, state: &mut TuiState) {
     )];
     match &state.snapshot.daemon {
         Some(d) => spans.push(Span::styled(
-            format!(
-                "conectado · perfil: {} · intervalo: {}s · histéresis: {}°C",
-                d.active_profile, d.poll_interval_secs, d.hysteresis_celsius
+            i18n::fmt_daemon_connected(
+                state.lang,
+                &d.active_profile,
+                d.poll_interval_secs,
+                d.hysteresis_celsius,
             ),
             Style::default().fg(Color::Green),
         )),
         None => spans.push(Span::styled(
-            "daemon desconectado",
+            s.daemon_disconnected,
             Style::default().fg(Color::Red),
         )),
     }
@@ -799,7 +806,10 @@ pub fn draw(frame: &mut Frame, state: &mut TuiState) {
         })
         .collect();
     frame.render_widget(
-        List::new(items).block(panel_block("Perfiles", state.focus == Focus::Profiles)),
+        List::new(items).block(panel_block(
+            s.profiles_title,
+            state.focus == Focus::Profiles,
+        )),
         right[0],
     );
 
@@ -807,21 +817,18 @@ pub fn draw(frame: &mut Frame, state: &mut TuiState) {
 
     // Footer
     frame.render_widget(
-        Paragraph::new(
-            "q salir · Tab foco · ↑/↓ j/k desplazar · Enter/a aplicar · c curva · r recargar · ? ayuda",
-        )
-        .block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(s.footer).block(Block::default().borders(Borders::ALL)),
         rows[2],
     );
 
     if state.show_help {
-        let area = centered_rect(56, HELP_LINES.len() as u16 + 2, frame.area());
+        let area = centered_rect(56, s.help_lines.len() as u16 + 2, frame.area());
         frame.render_widget(Clear, area);
         frame.render_widget(
-            Paragraph::new(HELP_LINES.map(Line::from).to_vec()).block(
+            Paragraph::new(s.help_lines.map(Line::from).to_vec()).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Ayuda")
+                    .title(s.help_title)
                     .border_style(Style::default().fg(Color::Yellow)),
             ),
             area,
@@ -1041,5 +1048,74 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(text.contains("Pump duty 60%"));
+    }
+
+    #[test]
+    fn language_key_toggles_state_and_status_message() {
+        let mut s = state();
+        assert_eq!(s.lang, Language::Es);
+        let action = map_key(
+            &mut s,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        );
+        assert_eq!(action, KeyAction::None);
+        assert_eq!(s.lang, Language::En);
+        assert_eq!(s.config.language, Language::En);
+        assert_eq!(s.status_message.as_deref(), Some("language: English"));
+
+        let action = map_key(
+            &mut s,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        );
+        assert_eq!(action, KeyAction::None);
+        assert_eq!(s.lang, Language::Es);
+        assert_eq!(s.config.language, Language::Es);
+        assert_eq!(s.status_message.as_deref(), Some("idioma: Español"));
+    }
+
+    #[test]
+    fn draw_renders_english_localization() {
+        let mut cfg = Config::starter_nzxt();
+        cfg.language = Language::En;
+        let mut s = TuiState::new(cfg, false, PathBuf::from("/tmp/x.sock"));
+        assert_eq!(s.lang, Language::En);
+        s.snapshot.daemon = Some(DaemonStatus {
+            active_profile: "silent".into(),
+            config_path: None,
+            poll_interval_secs: 2,
+            hysteresis_celsius: 2.0,
+            min_duty_delta: 3,
+        });
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| draw(f, &mut s)).unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("connected"));
+        assert!(text.contains("NZXT Devices (liquidctl)"));
+        assert!(text.contains("(no devices)"));
+        assert!(text.contains("History °C"));
+        assert!(text.contains("Sensors (hwmon / NVIDIA)"));
+        assert!(text.contains("Device"));
+        assert!(text.contains("Profiles"));
+        assert!(text.contains("Curves (c)"));
+        assert!(text.contains("q quit"));
+        assert!(text.contains("l lang"));
+
+        s.show_help = true;
+        term.draw(|f| draw(f, &mut s)).unwrap();
+        let help_text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(help_text.contains("Help"));
+        assert!(help_text.contains("switch language (ES/EN)"));
     }
 }

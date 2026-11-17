@@ -12,7 +12,10 @@ use nxctl_core::config::Config;
 use nxctl_core::curve::HysteresisController;
 use nxctl_core::engine::{ApplyReport, apply_profile, step_daemon_tick};
 use nxctl_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
-use nxctl_core::{DaemonStatus, IpcRequest, IpcResponse, ResumeDetector, default_socket_path};
+use nxctl_core::{
+    DaemonStatus, IpcRequest, IpcResponse, ResumeDetector, apply_pywal_palette,
+    default_colors_json_path, default_socket_path, load_pywal_palette,
+};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
 
 const POLL_SLEEP_STEP: Duration = Duration::from_millis(100);
@@ -58,6 +61,7 @@ struct DaemonState {
     interval: Duration,
     dry_run: bool,
     cli_init_on_resume: bool,
+    last_pywal_mtime: Option<std::time::SystemTime>,
 }
 
 impl DaemonState {
@@ -80,6 +84,7 @@ impl DaemonState {
             interval,
             dry_run,
             cli_init_on_resume: false,
+            last_pywal_mtime: None,
         }
     }
 
@@ -110,6 +115,8 @@ impl DaemonState {
         let report = apply_profile(backend, &self.config, &self.active_profile, self.dry_run)
             .with_context(|| format!("reaplicando perfil '{}'", self.active_profile))?;
         tracing::info!(?report, "perfil '{}' reaplicado", self.active_profile);
+        self.last_pywal_mtime = None;
+        self.sync_pywal_if_changed(backend);
         Ok(report)
     }
 
@@ -136,7 +143,52 @@ impl DaemonState {
         self.config = new_config;
         self.controller = new_controller;
         self.interval = new_interval;
+        self.last_pywal_mtime = None;
+        self.sync_pywal_if_changed(backend);
         Ok(())
+    }
+
+    fn sync_pywal_if_changed(&mut self, backend: &dyn LiquidctlBackend) {
+        if !self.config.pywal.enabled {
+            return;
+        }
+        let Some(path) = self
+            .config
+            .pywal
+            .colors_path
+            .as_deref()
+            .map(PathBuf::from)
+            .or_else(default_colors_json_path)
+        else {
+            return;
+        };
+
+        let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
+            return;
+        };
+
+        if Some(mtime) != self.last_pywal_mtime {
+            match load_pywal_palette(Some(&path)) {
+                Ok(palette) => {
+                    match apply_pywal_palette(backend, &self.config.pywal, &palette, self.dry_run) {
+                        Ok(applied) => {
+                            self.last_pywal_mtime = Some(mtime);
+                            tracing::info!(
+                                path = %path.display(),
+                                applied,
+                                "paleta pywal sincronizada"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("error aplicando paleta pywal: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("error cargando paleta pywal desde {}: {e}", path.display());
+                }
+            }
+        }
     }
 
     fn set_profile(&mut self, backend: &dyn LiquidctlBackend, profile: &str) -> Result<()> {
@@ -402,6 +454,7 @@ fn main() -> Result<()> {
 
     let mut state = DaemonState::new(config, cli.config, profile, cli.dry_run)
         .with_init_on_resume(cli.init_on_resume);
+    state.sync_pywal_if_changed(&backend);
     let mut resume_detector = ResumeDetector::default();
 
     while !stop_requested.load(Ordering::SeqCst) {
@@ -413,6 +466,8 @@ fn main() -> Result<()> {
             &mut resume_detector,
             &ipc_rx,
         );
+
+        state.sync_pywal_if_changed(&backend);
 
         match step_daemon_tick(
             &backend,
@@ -640,5 +695,42 @@ mod tests {
         assert!(matches!(resp, IpcResponse::Error { .. }));
         assert_eq!(state.active_profile, "performance");
         assert!(state.config.profiles.contains_key("performance"));
+    }
+
+    #[test]
+    fn daemon_state_sync_pywal_if_changed_tracks_mtime() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("nxctld-pywal-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let colors_json = temp_dir.join("colors.json");
+
+        let wal_content = r##"{
+            "wallpaper": "/tmp/test.png",
+            "colors": {
+                "color0": "#000000",
+                "color1": "#111111",
+                "color4": "#444444"
+            }
+        }"##;
+        std::fs::write(&colors_json, wal_content).unwrap();
+
+        let mut cfg = Config::starter_nzxt();
+        cfg.pywal.enabled = true;
+        cfg.pywal.colors_path = Some(colors_json.display().to_string());
+
+        let backend = MockLiquidctlBackend::new();
+        let mut state = DaemonState::new(cfg, None, "default".into(), false);
+
+        assert_eq!(state.last_pywal_mtime, None);
+        state.sync_pywal_if_changed(&backend);
+        assert!(state.last_pywal_mtime.is_some());
+        let initial_calls = backend.calls().len();
+        assert!(initial_calls > 0);
+
+        // Calling again without file modification should not issue calls
+        state.sync_pywal_if_changed(&backend);
+        assert_eq!(backend.calls().len(), initial_calls);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
