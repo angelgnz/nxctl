@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NXCTL
+GenericName=Cooling & RGB Dashboard
+Comment=Open-source NZXT & liquidctl cooling and RGB controller
+Exec=/usr/bin/nxctl-gui
+Icon=nxctl
+Terminal=false
+Categories=System;Settings;HardwareSettings;
+Keywords=nzxt;liquidctl;kraken;cooling;rgb;fan;

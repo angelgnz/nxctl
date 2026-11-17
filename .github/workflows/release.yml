@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without v prefix (defaults to Cargo.toml version)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  NFPM_VERSION: "2.49.0"
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies for eframe/egui
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libgl1-mesa-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Determine release version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          elif [[ "$GITHUB_REF_NAME" == v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+      - name: Build release binaries
+        run: cargo build --release --workspace --locked
+
+      - name: Install nfpm
+        run: |
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" -o /tmp/nfpm.tar.gz
+          tar -xzf /tmp/nfpm.tar.gz -C /tmp nfpm
+          sudo install -m755 /tmp/nfpm /usr/local/bin/nfpm
+          rm -f /tmp/nfpm.tar.gz /tmp/nfpm
+
+      - name: Package release artifacts
+        run: |
+          mkdir -p dist
+          nfpm package -f packaging/nfpm.yaml -p deb -t "dist/nxctl_${VERSION}_amd64.deb"
+          nfpm package -f packaging/nfpm.yaml -p rpm -t "dist/nxctl-${VERSION}-1.x86_64.rpm"
+          nfpm package -f packaging/nfpm.yaml -p archlinux -t "dist/nxctl-${VERSION}-1-x86_64.pkg.tar.zst"
+          tar -czf "dist/nxctl-${VERSION}-linux-x86_64.tar.gz" \
+            -C target/release nxctl nxctld nxctl-gui \
+            -C "$PWD" contrib README.md
+          sed "s/^pkgver=.*/pkgver=${VERSION}/" packaging/arch/PKGBUILD > dist/PKGBUILD
+          (cd dist && sha256sum * > SHA256SUMS)
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nxctl-packages
+          path: dist/*
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

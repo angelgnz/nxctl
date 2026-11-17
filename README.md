@@ -45,7 +45,40 @@ All user-facing tools (`nxctl-gui`, `nxctl`, and `nxctl tui`) support **English 
 
 ## Installation
 
+### Prebuilt Packages (GitHub Releases)
+
+Download the appropriate package for your distribution from the [GitHub Releases](../../releases) page:
+
+- **Arch Linux**:
+
+  ```sh
+  sudo pacman -U nxctl-*.pkg.tar.zst
+  ```
+
+  Or build locally from `packaging/arch/PKGBUILD`:
+
+  ```sh
+  cd packaging/arch && makepkg -si
+  ```
+
+- **Ubuntu / Debian**:
+
+  ```sh
+  sudo apt install ./nxctl_*_amd64.deb
+  ```
+
+- **Fedora**:
+
+  ```sh
+  sudo dnf install ./nxctl-*.x86_64.rpm
+  ```
+
+### Build from Source
+
 Requires `liquidctl` in `PATH` and Rust (2024 edition).
+
+> **Note:** Building `nxctl-gui` (`eframe`/`egui`) requires X11/Wayland/OpenGL development headers. On Debian/Ubuntu, install:
+> `sudo apt install pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev`
 
 ```sh
 cargo build --release

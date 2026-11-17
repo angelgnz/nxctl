@@ -1,0 +1,70 @@
+name: "nxctl"
+arch: "amd64"
+platform: "linux"
+version: "${VERSION}"
+section: "utils"
+priority: "optional"
+maintainer: "angelgnz <https://github.com/angelgnz/nxctl>"
+description: "Open-source Linux alternative to NZXT CAM over liquidctl (CLI, TUI, daemon, and GUI)"
+homepage: "https://github.com/angelgnz/nxctl"
+license: "MIT OR Apache-2.0"
+
+recommends:
+  - liquidctl
+
+overrides:
+  deb:
+    recommends:
+      - liquidctl
+  rpm:
+    recommends:
+      - liquidctl
+  archlinux:
+    depends:
+      - gcc-libs
+      - glibc
+      - libxkbcommon
+      - libx11
+      - wayland
+      - libglvnd
+
+scripts:
+  postinstall: "packaging/scripts/postinstall.sh"
+
+contents:
+  - src: target/release/nxctl
+    dst: /usr/bin/nxctl
+    file_info:
+      mode: 0755
+  - src: target/release/nxctld
+    dst: /usr/bin/nxctld
+    file_info:
+      mode: 0755
+  - src: target/release/nxctl-gui
+    dst: /usr/bin/nxctl-gui
+    file_info:
+      mode: 0755
+  - src: contrib/72-nzxt-hwmon.rules
+    dst: /usr/lib/udev/rules.d/72-nzxt-hwmon.rules
+    file_info:
+      mode: 0644
+  - src: contrib/nxctld.service
+    dst: /usr/lib/systemd/system/nxctld.service
+    file_info:
+      mode: 0644
+  - src: contrib/nxctld-user.service
+    dst: /usr/lib/systemd/user/nxctld.service
+    file_info:
+      mode: 0644
+  - src: contrib/nxctl-sleep
+    dst: /usr/lib/systemd/system-sleep/nxctl-sleep
+    file_info:
+      mode: 0755
+  - src: contrib/nxctl-gui.desktop
+    dst: /usr/share/applications/nxctl-gui.desktop
+    file_info:
+      mode: 0644
+  - src: contrib/nxctl.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/nxctl.svg
+    file_info:
+      mode: 0644

@@ -1,10 +1,10 @@
 [Unit]
-Description=nxctl daemon (control de ventiladores/iluminación NZXT)
+Description=nxctl thermal and RGB control daemon
 After=default.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/nxctld
+ExecStart=/usr/bin/nxctld
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5

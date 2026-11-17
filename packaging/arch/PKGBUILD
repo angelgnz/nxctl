@@ -1,0 +1,52 @@
+# Maintainer: angelgnz <https://github.com/angelgnz/nxctl>
+pkgname=nxctl
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Open-source Linux alternative to NZXT CAM over liquidctl (CLI, TUI, daemon, and GUI)"
+arch=('x86_64')
+url="https://github.com/angelgnz/nxctl"
+license=('MIT' 'Apache-2.0')
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'libx11' 'wayland' 'libglvnd')
+makedepends=('cargo')
+optdepends=(
+    'liquidctl: USB HID device control backend'
+    'openrgb: generic RGB lighting support'
+    'nvidia-utils: NVIDIA GPU temperature and fan control'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --workspace
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo test --frozen --workspace
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    install -Dm755 target/release/nxctl "$pkgdir/usr/bin/nxctl"
+    install -Dm755 target/release/nxctld "$pkgdir/usr/bin/nxctld"
+    install -Dm755 target/release/nxctl-gui "$pkgdir/usr/bin/nxctl-gui"
+
+    install -Dm644 contrib/72-nzxt-hwmon.rules "$pkgdir/usr/lib/udev/rules.d/72-nzxt-hwmon.rules"
+    install -Dm644 contrib/nxctld.service "$pkgdir/usr/lib/systemd/system/nxctld.service"
+    install -Dm644 contrib/nxctld-user.service "$pkgdir/usr/lib/systemd/user/nxctld.service"
+    install -Dm755 contrib/nxctl-sleep "$pkgdir/usr/lib/systemd/system-sleep/nxctl-sleep"
+    install -Dm644 contrib/nxctl-gui.desktop "$pkgdir/usr/share/applications/nxctl-gui.desktop"
+    install -Dm644 contrib/nxctl.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/nxctl.svg"
+}
