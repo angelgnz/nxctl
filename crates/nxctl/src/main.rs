@@ -1,5 +1,6 @@
 mod i18n;
 mod tui;
+mod tui_state;
 
 use std::path::{Path, PathBuf};
 
@@ -506,7 +507,13 @@ fn main() -> Result<()> {
                 config.language = l;
             }
             let sock = socket.unwrap_or_else(default_socket_path);
-            tui::run(config, cli.dry_run, sock, interval)?;
+            tui::run(
+                config,
+                cfg_path.map(Path::to_path_buf),
+                cli.dry_run,
+                sock,
+                interval,
+            )?;
         }
         Command::Daemon(cmd) => {
             let lang = resolve_lang(cli.lang, cfg_path);
