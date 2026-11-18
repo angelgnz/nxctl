@@ -55,6 +55,54 @@ All user-facing tools (`nxctl-gui`, `nxctl`, and `nxctl tui`) support **English 
 
 ## Installation
 
+### Package Repository (Recommended — Signed Updates via GitHub Pages)
+
+Install `nxctl` and receive automatic signed updates through the central [`angelgnz/packages`](https://angelgnz.github.io/packages/) repository:
+
+- **Ubuntu / Debian / Mint / Pop!_OS (`apt`)**:
+
+  ```sh
+  curl -fsSL https://angelgnz.github.io/packages/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/angelgnz-packages.gpg
+  echo "deb [arch=amd64 signed-by=/usr/share/keyrings/angelgnz-packages.gpg] https://angelgnz.github.io/packages/apt stable main" | sudo tee /etc/apt/sources.list.d/angelgnz-packages.list
+  sudo apt update && sudo apt install nxctl
+  ```
+
+- **Fedora Workstation (`dnf`)**:
+
+  ```sh
+  sudo curl -fsSL https://angelgnz.github.io/packages/rpm/angelgnz-packages.repo -o /etc/yum.repos.d/angelgnz-packages.repo
+  sudo dnf install nxctl
+  ```
+
+- **Fedora Atomic / Silverblue / Kinoite / Bazzite (`rpm-ostree`)**:
+
+  ```sh
+  sudo curl -fsSL https://angelgnz.github.io/packages/rpm/angelgnz-packages.repo -o /etc/yum.repos.d/angelgnz-packages.repo
+  rpm-ostree install nxctl
+  sudo rpm-ostree apply-live --allow-replacement
+  sudo udevadm control --reload-rules && sudo udevadm trigger -s hwmon
+  systemctl --user enable --now nxctld
+  ```
+
+- **openSUSE Tumbleweed / Leap (`zypper`) & Aeon / MicroOS (`transactional-update`)**:
+
+  ```sh
+  sudo rpm --import https://angelgnz.github.io/packages/gpg.key
+  sudo zypper ar -f https://angelgnz.github.io/packages/rpm angelgnz-packages
+  sudo zypper refresh && sudo zypper in nxctl
+  # Or on Aeon / MicroOS:
+  sudo transactional-update pkg install nxctl
+  ```
+
+- **Arch Linux / EndeavourOS / CachyOS (`pacman`)**:
+
+  ```sh
+  curl -fsSL https://angelgnz.github.io/packages/gpg.key | sudo pacman-key --add -
+  sudo pacman-key --lsign-key 44B0056D18E88F598404490A1ACBF949D4EB5BDD
+  printf '\n[angelgnz]\nSigLevel = Required DatabaseOptional\nServer = https://angelgnz.github.io/packages/arch/$arch\n' | sudo tee -a /etc/pacman.conf
+  sudo pacman -Syu nxctl
+  ```
+
 ### Prebuilt Packages (GitHub Releases)
 
 Download the appropriate package for your distribution from the [GitHub Releases](../../releases) page:

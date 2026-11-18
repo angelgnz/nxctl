@@ -50,7 +50,10 @@ jobs:
         run: cargo test --workspace
 
       - name: Validate packaging scripts
-        run: bash -n packaging/appimage/build-appimage.sh
+        run: |
+          bash -n packaging/appimage/build-appimage.sh
+          bash -n packaging/repo/publish-repo.sh
+          python3 -m py_compile packaging/repo/build_pacman_db.py
 
   nix:
     runs-on: ubuntu-latest
