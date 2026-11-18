@@ -6,6 +6,13 @@ REPO_DIR="${2:?usage: publish-repo.sh DIST_DIR REPO_DIR GPG_KEY_ID}"
 GPG_KEY_ID="${3:?usage: publish-repo.sh DIST_DIR REPO_DIR GPG_KEY_ID}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+if [ -n "${GNUPGHOME:-}" ]; then
+  mkdir -p "${GNUPGHOME}"
+  if ! grep -qxF 'pinentry-mode loopback' "${GNUPGHOME}/gpg.conf" 2>/dev/null; then
+    printf 'batch\npinentry-mode loopback\n' >> "${GNUPGHOME}/gpg.conf"
+  fi
+fi
+
 mkdir -p \
   "${REPO_DIR}" \
   "${REPO_DIR}/apt/pool/main/n/nxctl" \
@@ -67,7 +74,6 @@ for rpm_file in "${rpms[@]}"; do
   rpmsign \
     --define "_gpg_name ${GPG_KEY_ID}" \
     --define "__gpg $(command -v gpg)" \
-    --define "__gpg_sign_cmd %{__gpg} --batch --no-verbose --no-armor --pinentry-mode loopback -u \"%{_gpg_name}\" -sbo %{__signature_filename} --digest-algo sha256 %{__plaintext_filename}" \
     --addsign "${dest_rpm}"
 done
 

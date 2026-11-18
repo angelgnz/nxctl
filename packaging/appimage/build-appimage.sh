@@ -42,7 +42,8 @@ install -Dm644 "${ROOT_DIR}/contrib/nxctl.svg" \
 install -Dm644 "${ROOT_DIR}/contrib/nxctl-tray.svg" \
   "${APP_DIR}/usr/share/icons/hicolor/scalable/status/nxctl-tray.svg"
 install -Dm644 "${ROOT_DIR}/contrib/nxctl.svg" "${APP_DIR}/nxctl.svg"
-ln -sf "nxctl.svg" "${APP_DIR}/.DirIcon"
+install -Dm644 "${ROOT_DIR}/crates/nxctl-gui/assets/icon.png" "${APP_DIR}/nxctl.png"
+install -Dm644 "${ROOT_DIR}/crates/nxctl-gui/assets/icon.png" "${APP_DIR}/.DirIcon"
 
 sed 's|^Exec=.*|Exec=nxctl-gui|' "${ROOT_DIR}/contrib/nxctl-gui.desktop" \
   > "${APP_DIR}/nxctl-gui.desktop"
