@@ -308,7 +308,11 @@ pub fn set_hwmon_pwm_in(
         ));
     }
 
-    let dirs = sorted_dirs(base)?;
+    let dirs = match sorted_dirs(base) {
+        Ok(dirs) => dirs,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
     let mut matched_dir: Option<PathBuf> = None;
     for dir in dirs {
         let name = read_trimmed(&dir.join("name")).unwrap_or_default();
@@ -537,6 +541,10 @@ mod tests {
         ));
         assert!(matches!(
             set_hwmon_pwm_in(&base, "nct6775", "pwm2", 50, false),
+            Err(CoreError::Validation(_))
+        ));
+        assert!(matches!(
+            set_hwmon_pwm_in(&base.join("nonexistent-base"), "nct6775", "pwm1", 50, true),
             Err(CoreError::Validation(_))
         ));
 
