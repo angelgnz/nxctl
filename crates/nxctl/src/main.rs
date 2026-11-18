@@ -502,9 +502,10 @@ fn main() -> Result<()> {
             }
         }
         Command::Tui { socket, interval } => {
-            let mut config = Config::load(cfg_path)?;
+            let mut config = Config::load_or_init(cfg_path, &backend)?;
             if let Some(l) = cli.lang {
                 config.language = l;
+                let _ = config.save(cfg_path);
             }
             let sock = socket.unwrap_or_else(default_socket_path);
             tui::run(

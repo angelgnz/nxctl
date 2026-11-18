@@ -416,7 +416,8 @@ fn main() -> Result<()> {
         )
         .init();
 
-    let config = Config::load(cli.config.as_deref())?;
+    let backend = CliLiquidctlBackend::new();
+    let config = Config::load_or_init(cli.config.as_deref(), &backend)?;
     let profile = cli
         .profile
         .unwrap_or_else(|| config.default_profile.clone());
@@ -424,7 +425,6 @@ fn main() -> Result<()> {
         bail!("perfil '{profile}' no existe");
     }
     let socket_path = cli.socket.unwrap_or_else(default_socket_path);
-    let backend = CliLiquidctlBackend::new();
 
     let stop_requested = Arc::new(AtomicBool::new(false));
     let reload_requested = Arc::new(AtomicBool::new(false));

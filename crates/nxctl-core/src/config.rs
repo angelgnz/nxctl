@@ -46,6 +46,8 @@ pub struct Config {
     #[serde(default)]
     pub language: Language,
     #[serde(default)]
+    pub close_to_tray: bool,
+    #[serde(default)]
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub pywal: PywalConfig,
@@ -231,6 +233,30 @@ impl Config {
         let config: Self = toml::from_str(&contents)?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Loads configuration from `path` (or [`Config::default_path`]), or auto-detects hardware
+    /// and saves a starter configuration if the file does not exist yet.
+    pub fn load_or_init(
+        path: Option<&Path>,
+        backend: &dyn crate::liquidctl::LiquidctlBackend,
+    ) -> Result<Self> {
+        let target_path = match path {
+            Some(p) => p.to_path_buf(),
+            None => Self::default_path()?,
+        };
+        if target_path.exists() {
+            return Self::load(Some(&target_path));
+        }
+
+        let devices = backend.status(None).unwrap_or_default();
+        let sensors = crate::hwmon::list_hwmon_sensors().unwrap_or_default();
+        let fans = crate::hwmon::list_hwmon_fans().unwrap_or_default();
+        let nvidia = crate::nvidia::list_nvidia_gpus().unwrap_or_default();
+        let mut cfg = Self::from_detected(&devices, &sensors, &fans, &nvidia);
+        cfg.language = Language::detect_from_env();
+        let _ = cfg.save(Some(&target_path));
+        Ok(cfg)
     }
 
     /// Serializes and saves configuration to `path` (or [`Config::default_path`]), creating parent directories.
@@ -494,6 +520,7 @@ impl Config {
         Self {
             default_profile: "default".to_string(),
             language: Language::Es,
+            close_to_tray: false,
             daemon: DaemonConfig {
                 temp_sensor: Some(TempSensorRef::Liquidctl {
                     match_device: "kraken".to_string(),
@@ -658,6 +685,7 @@ impl Config {
         Self {
             default_profile: "default".to_string(),
             language: Language::Es,
+            close_to_tray: false,
             daemon: DaemonConfig {
                 temp_sensor,
                 ..DaemonConfig::default()
@@ -1273,5 +1301,49 @@ language = "en"
         assert!(serialized.contains("language = \"en\""));
         let roundtripped: Config = toml::from_str(&serialized).expect("roundtrip config");
         assert_eq!(roundtripped.language, Language::En);
+    }
+
+    #[test]
+    fn close_to_tray_defaults_to_false_and_roundtrips_true() {
+        let without_flag = r#"
+default_profile = "default"
+"#;
+        let cfg: Config = toml::from_str(without_flag).expect("toml without close_to_tray");
+        assert!(!cfg.close_to_tray);
+
+        let with_flag = r#"
+default_profile = "default"
+close_to_tray = true
+"#;
+        let cfg_true: Config = toml::from_str(with_flag).expect("toml with close_to_tray = true");
+        assert!(cfg_true.close_to_tray);
+
+        let serialized = toml::to_string(&cfg_true).expect("serialize config");
+        assert!(serialized.contains("close_to_tray = true"));
+        let roundtripped: Config = toml::from_str(&serialized).expect("roundtrip config");
+        assert!(roundtripped.close_to_tray);
+    }
+
+    #[test]
+    fn load_or_init_creates_config_when_missing_and_loads_when_present() {
+        let path = temp_file_path("load_or_init");
+        let _ = fs::remove_file(&path);
+        let backend = crate::liquidctl::MockLiquidctlBackend::new();
+
+        let created = Config::load_or_init(Some(&path), &backend).expect("load_or_init creates");
+        assert!(path.exists());
+        created.validate().expect("created config validates");
+
+        let mut customized = created.clone();
+        customized.close_to_tray = true;
+        customized.save(Some(&path)).expect("save customized");
+
+        let loaded = Config::load_or_init(Some(&path), &backend).expect("load_or_init loads");
+        assert!(loaded.close_to_tray);
+
+        let _ = fs::remove_file(&path);
+        if let Some(parent) = path.parent() {
+            let _ = fs::remove_dir(parent);
+        }
     }
 }

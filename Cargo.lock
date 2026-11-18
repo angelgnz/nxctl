@@ -2300,7 +2300,7 @@ dependencies = [
 
 [[package]]
 name = "nxctl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2313,7 +2313,7 @@ dependencies = [
 
 [[package]]
 name = "nxctl-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "serde",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "nxctl-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2335,11 +2335,12 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "x11rb",
 ]
 
 [[package]]
 name = "nxctld"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",

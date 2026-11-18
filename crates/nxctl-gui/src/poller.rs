@@ -274,6 +274,11 @@ impl Poller {
     pub fn trigger(&self) {
         let _ = self.trigger.send(());
     }
+
+    /// Returns a cloned sender that triggers immediate background polls.
+    pub fn trigger_sender(&self) -> Sender<()> {
+        self.trigger.clone()
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 # Maintainer: angelgnz <https://github.com/angelgnz/nxctl>
 pkgname=nxctl
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Open-source Linux alternative to NZXT CAM over liquidctl (CLI, TUI, daemon, and GUI)"
 arch=('x86_64')
@@ -46,7 +46,10 @@ package() {
     install -Dm644 contrib/72-nzxt-hwmon.rules "$pkgdir/usr/lib/udev/rules.d/72-nzxt-hwmon.rules"
     install -Dm644 contrib/nxctld.service "$pkgdir/usr/lib/systemd/system/nxctld.service"
     install -Dm644 contrib/nxctld-user.service "$pkgdir/usr/lib/systemd/user/nxctld.service"
+    install -dm755 "$pkgdir/etc/systemd/user/default.target.wants"
+    ln -s /usr/lib/systemd/user/nxctld.service "$pkgdir/etc/systemd/user/default.target.wants/nxctld.service"
     install -Dm755 contrib/nxctl-sleep "$pkgdir/usr/lib/systemd/system-sleep/nxctl-sleep"
     install -Dm644 contrib/nxctl-gui.desktop "$pkgdir/usr/share/applications/nxctl-gui.desktop"
     install -Dm644 contrib/nxctl.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/nxctl.svg"
+    install -Dm644 contrib/nxctl-tray.svg "$pkgdir/usr/share/icons/hicolor/scalable/status/nxctl-tray.svg"
 }

@@ -519,6 +519,7 @@ mod tests {
         Config {
             default_profile: "default".into(),
             language: Language::Es,
+            close_to_tray: false,
             daemon: DaemonConfig::default(),
             pywal: PywalConfig::default(),
             curves: BTreeMap::new(),

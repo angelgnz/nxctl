@@ -56,6 +56,9 @@ contents:
     dst: /usr/lib/systemd/user/nxctld.service
     file_info:
       mode: 0644
+  - src: /usr/lib/systemd/user/nxctld.service
+    dst: /etc/systemd/user/default.target.wants/nxctld.service
+    type: symlink
   - src: contrib/nxctl-sleep
     dst: /usr/lib/systemd/system-sleep/nxctl-sleep
     file_info:
@@ -66,5 +69,9 @@ contents:
       mode: 0644
   - src: contrib/nxctl.svg
     dst: /usr/share/icons/hicolor/scalable/apps/nxctl.svg
+    file_info:
+      mode: 0644
+  - src: contrib/nxctl-tray.svg
+    dst: /usr/share/icons/hicolor/scalable/status/nxctl-tray.svg
     file_info:
       mode: 0644
