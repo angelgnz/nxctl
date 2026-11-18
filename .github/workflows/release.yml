@@ -36,7 +36,9 @@ jobs:
             libxcb-render0-dev \
             libxcb-shape0-dev \
             libxcb-xfixes0-dev \
-            libgl1-mesa-dev
+            libgl1-mesa-dev \
+            file \
+            desktop-file-utils
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -80,6 +82,8 @@ jobs:
             -C target/release nxctl nxctld nxctl-gui \
             -C "$PWD" contrib README.md
           sed "s/^pkgver=.*/pkgver=${VERSION}/" packaging/arch/PKGBUILD > dist/PKGBUILD
+          sed "s/^Version:.*/Version:        ${VERSION}/" packaging/rpm/nxctl.spec > dist/nxctl.spec
+          bash packaging/appimage/build-appimage.sh "${VERSION}"
           (cd dist && sha256sum * > SHA256SUMS)
 
       - name: Upload release artifacts

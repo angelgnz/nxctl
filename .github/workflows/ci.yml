@@ -48,3 +48,23 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      - name: Validate packaging scripts
+        run: bash -n packaging/appimage/build-appimage.sh
+
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Validate flake and build package
+        run: |
+          nix flake show
+          nix build --no-link

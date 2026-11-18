@@ -77,10 +77,74 @@ Download the appropriate package for your distribution from the [GitHub Releases
   sudo apt install ./nxctl_*_amd64.deb
   ```
 
-- **Fedora**:
+- **Fedora Workstation**:
 
   ```sh
   sudo dnf install ./nxctl-*.x86_64.rpm
+  ```
+
+- **Fedora Atomic / Silverblue / Kinoite / Bazzite (`rpm-ostree`)**:
+
+  ```sh
+  rpm-ostree install ./nxctl-*.x86_64.rpm
+  # Apply immediately without waiting for a reboot (or reboot normally):
+  sudo rpm-ostree apply-live --allow-replacement
+  sudo udevadm control --reload-rules && sudo udevadm trigger -s hwmon
+  systemctl --user enable --now nxctld
+  ```
+
+  *(You can also build RPMs cleanly on Fedora/COPR using `packaging/rpm/nxctl.spec`.)*
+
+- **openSUSE (Tumbleweed / Leap) & Aeon / MicroOS**:
+
+  - Tumbleweed / Leap:
+    ```sh
+    sudo zypper in --allow-unsigned-rpm ./nxctl-*.x86_64.rpm
+    ```
+  - Aeon / MicroOS (`transactional-update`):
+    ```sh
+    sudo transactional-update pkg install ./nxctl-*.x86_64.rpm
+    ```
+
+  *(An OBS-compatible RPM spec is also provided at `packaging/rpm/nxctl.spec`.)*
+
+- **NixOS & Nix Flakes (`flake.nix`)**:
+
+  Run directly without installing:
+
+  ```sh
+  nix run github:angelgnz/nxctl
+  ```
+
+  Or add the flake module to `/etc/nixos/flake.nix` to install binaries, `liquidctl`, `udev` rules, and the `nxctld` user service declaratively:
+
+  ```nix
+  {
+    inputs = {
+      nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+      nxctl.url = "github:angelgnz/nxctl";
+    };
+
+    outputs = { nixpkgs, nxctl, ... }: {
+      nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          nxctl.nixosModules.default
+          { services.nxctl.enable = true; }
+        ];
+      };
+    };
+  }
+  ```
+
+- **AppImage (Universal Portable)**:
+
+  Requires `liquidctl` and the `udev` rule ([contrib/72-nzxt-hwmon.rules](contrib/72-nzxt-hwmon.rules)) installed on the host for rootless fan/pump access:
+
+  ```sh
+  chmod +x nxctl-*-x86_64.AppImage
+  ./nxctl-*-x86_64.AppImage              # launches nxctl-gui (with bundled nxctld)
+  ./nxctl-*-x86_64.AppImage nxctl status # run CLI subcommands from the same bundle
   ```
 
 ### Build from Source
