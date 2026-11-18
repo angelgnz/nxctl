@@ -2,6 +2,8 @@
 /dist/
 /result
 /result-*
+__pycache__/
+*.py[cod]
 **/*.rs.bk
 *.pdb
 .DS_Store
