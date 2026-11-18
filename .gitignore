@@ -1,5 +1,17 @@
 /target/
+/dist/
 **/*.rs.bk
 *.pdb
 .DS_Store
 .env
+
+# Local agent / Herdr workspace state
+/AGENTS.md
+/build-activity.log
+/capture/
+/craft.json
+/feed.json
+/inbox/
+/investigation.cany/
+/pinned/
+/usage.json
