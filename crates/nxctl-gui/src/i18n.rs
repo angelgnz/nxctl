@@ -29,6 +29,7 @@ pub struct GuiStrings {
     pub no_additional_sensors: &'static str,
     pub feature: &'static str,
     pub net_tag: &'static str,
+    pub drag_card_tooltip: &'static str,
 
     // Fans
     pub no_cooling_channels: &'static str,
@@ -42,6 +43,7 @@ pub struct GuiStrings {
     pub pywal_auto_sync: &'static str,
     pub global_mode: &'static str,
     pub filter_extremes: &'static str,
+    pub saturate_label: &'static str,
     pub shift_palette: &'static str,
     pub sync_now: &'static str,
     pub pywal_not_detected: &'static str,
@@ -94,6 +96,7 @@ pub const ES_STRINGS: GuiStrings = GuiStrings {
     no_additional_sensors: "Sin sensores adicionales detectados",
     feature: "+ Anclar",
     net_tag: "RED",
+    drag_card_tooltip: "Arrastrar para mover panel",
 
     no_cooling_channels: "Sin canales de ventilación detectados",
     curve: "Curva",
@@ -105,6 +108,7 @@ pub const ES_STRINGS: GuiStrings = GuiStrings {
     pywal_auto_sync: "Sincronizar automáticamente con pywal (daemon)",
     global_mode: "Modo global:",
     filter_extremes: "Filtrar muy blancos / negros",
+    saturate_label: "Saturar (vivos):",
     shift_palette: "Mover paleta:",
     sync_now: "Sincronizar ahora",
     pywal_not_detected: "pywal no detectado (~/.cache/wal/colors.json)",
@@ -156,6 +160,7 @@ pub const EN_STRINGS: GuiStrings = GuiStrings {
     no_additional_sensors: "No additional sensors detected",
     feature: "+ Pin",
     net_tag: "NET",
+    drag_card_tooltip: "Drag to move panel",
 
     no_cooling_channels: "No cooling channels detected",
     curve: "Curve",
@@ -167,6 +172,7 @@ pub const EN_STRINGS: GuiStrings = GuiStrings {
     pywal_auto_sync: "Auto-sync with pywal (daemon)",
     global_mode: "Global mode:",
     filter_extremes: "Filter extreme whites / blacks",
+    saturate_label: "Saturate (vivid):",
     shift_palette: "Shift palette:",
     sync_now: "Sync now",
     pywal_not_detected: "pywal not detected (~/.cache/wal/colors.json)",
@@ -499,6 +505,10 @@ mod tests {
         assert_eq!(en.active, "ACTIVE");
         assert_eq!(es.autogen_config, "Autogenerar TOML");
         assert_eq!(en.autogen_config, "Auto-generate TOML");
+        assert_eq!(es.saturate_label, "Saturar (vivos):");
+        assert_eq!(en.saturate_label, "Saturate (vivid):");
+        assert_eq!(es.drag_card_tooltip, "Arrastrar para mover panel");
+        assert_eq!(en.drag_card_tooltip, "Drag to move panel");
     }
 
     #[test]

@@ -64,6 +64,7 @@ pub struct TuiStrings {
     pub pywal_auto_sync: &'static str,
     pub global_mode: &'static str,
     pub filter_extremes: &'static str,
+    pub saturate_label: &'static str,
     pub shift_palette: &'static str,
     pub sync_now: &'static str,
     pub pywal_not_detected: &'static str,
@@ -152,6 +153,7 @@ static TUI_ES: TuiStrings = TuiStrings {
     pywal_auto_sync: "Auto-sync con pywal (daemon)",
     global_mode: "Modo global:",
     filter_extremes: "Filtrar muy blancos / negros",
+    saturate_label: "Saturar:",
     shift_palette: "Mover paleta:",
     sync_now: "Sincronizar ahora",
     pywal_not_detected: "pywal no detectado (~/.cache/wal/colors.json)",
@@ -167,7 +169,7 @@ static TUI_ES: TuiStrings = TuiStrings {
 
     footer_dashboard: "1-4 vistas · [/] perfil · Tab foco · ↑/↓ navegar · f destacar · p reaplicar · r recargar · l idioma · ? ayuda · q salir",
     footer_fans: "1-4 vistas · ↑/↓ canal · c curva · ←/→ -/+ duty · Enter aplicar · p reaplicar · r recargar · l idioma · ? ayuda · q salir",
-    footer_rgb: "1-4 vistas · Tab foco · ↑/↓ canal · m modo · ←/→ paleta · t auto · x filtro · s sync · Enter aplicar · ? ayuda · q salir",
+    footer_rgb: "1-4 vistas · Tab foco · ↑/↓ canal · m modo · ←/→ paleta · t auto · x filtro · v saturar · s sync · Enter aplicar · ? ayuda · q salir",
     footer_profiles: "1-4 vistas · ↑/↓ perfil · Enter/a aplicar · n nuevo · g autogen · d default · w exportar · Del eliminar · r recargar · ? ayuda · q salir",
 };
 
@@ -238,6 +240,7 @@ static TUI_EN: TuiStrings = TuiStrings {
     pywal_auto_sync: "Auto-sync with pywal (daemon)",
     global_mode: "Global mode:",
     filter_extremes: "Filter extreme whites / blacks",
+    saturate_label: "Saturate:",
     shift_palette: "Shift palette:",
     sync_now: "Sync now",
     pywal_not_detected: "pywal not detected (~/.cache/wal/colors.json)",
@@ -253,7 +256,7 @@ static TUI_EN: TuiStrings = TuiStrings {
 
     footer_dashboard: "1-4 views · [/] profile · Tab focus · ↑/↓ navigate · f feature · p reapply · r reload · l lang · ? help · q quit",
     footer_fans: "1-4 views · ↑/↓ channel · c curve · ←/→ -/+ duty · Enter apply · p reapply · r reload · l lang · ? help · q quit",
-    footer_rgb: "1-4 views · Tab focus · ↑/↓ channel · m mode · ←/→ palette · t auto · x filter · s sync · Enter apply · ? help · q quit",
+    footer_rgb: "1-4 views · Tab focus · ↑/↓ channel · m mode · ←/→ palette · t auto · x filter · v saturate · s sync · Enter apply · ? help · q quit",
     footer_profiles: "1-4 views · ↑/↓ profile · Enter/a apply · n new · g autogen · d default · w export · Del delete · r reload · ? help · q quit",
 };
 
@@ -916,6 +919,8 @@ mod tests {
         assert_eq!(en.global_mode, "Global mode:");
         assert_eq!(es.filter_extremes, "Filtrar muy blancos / negros");
         assert_eq!(en.filter_extremes, "Filter extreme whites / blacks");
+        assert_eq!(es.saturate_label, "Saturar:");
+        assert_eq!(en.saturate_label, "Saturate:");
         assert_eq!(es.shift_palette, "Mover paleta:");
         assert_eq!(en.shift_palette, "Shift palette:");
         assert_eq!(es.sync_now, "Sincronizar ahora");

@@ -81,12 +81,91 @@ pub fn is_extreme_bw(rgb: [u8; 3]) -> bool {
     luma < 32.0 || max_c < 45 || (luma > 205.0 && chroma < 42)
 }
 
+/// Normalizes a saturation setting (`0.0..=1.0` or percentage `1.0..=100.0`) into `0.0..=1.0`.
+pub fn normalize_saturate(val: f32) -> f32 {
+    if !val.is_finite() || val <= 0.0 {
+        0.0
+    } else if val > 1.0 {
+        (val / 100.0).clamp(0.0, 1.0)
+    } else {
+        val.clamp(0.0, 1.0)
+    }
+}
+
+/// Formats an `[r, g, b]` tuple as a 6-character lowercase hex string without `#`.
+pub fn rgb_to_hex(rgb: [u8; 3]) -> String {
+    format!("{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
+}
+
+/// Boosts HSV saturation and value of `rgb` by `amount` (`0.0..=1.0` or `0..=100`)
+/// so muted pywal colors appear vivid on hardware RGB LEDs.
+/// Near-neutral greys (`saturation < 0.05`) are returned unchanged.
+pub fn saturate_rgb(rgb: [u8; 3], amount: f32) -> [u8; 3] {
+    let amt = normalize_saturate(amount);
+    if amt <= 0.0 {
+        return rgb;
+    }
+    let rf = f32::from(rgb[0]) / 255.0;
+    let gf = f32::from(rgb[1]) / 255.0;
+    let bf = f32::from(rgb[2]) / 255.0;
+    let max = rf.max(gf).max(bf);
+    let min = rf.min(gf).min(bf);
+    let delta = max - min;
+    if max <= 1e-5 || delta <= 1e-5 {
+        return rgb;
+    }
+    let s = delta / max;
+    if s < 0.05 {
+        return rgb;
+    }
+    let h = if (max - rf).abs() < 1e-5 {
+        60.0 * (((gf - bf) / delta).rem_euclid(6.0))
+    } else if (max - gf).abs() < 1e-5 {
+        60.0 * (((bf - rf) / delta) + 2.0)
+    } else {
+        60.0 * (((rf - gf) / delta) + 4.0)
+    };
+    let new_s = (s + (1.0 - s) * amt).clamp(0.0, 1.0);
+    let new_v = if max > 0.10 {
+        (max + (1.0 - max) * (amt * 0.65)).clamp(0.0, 1.0)
+    } else {
+        max
+    };
+    let c = new_v * new_s;
+    let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let m = new_v - c;
+    let (r1, g1, b1) = match (h / 60.0).floor() as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    [
+        ((r1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((g1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((b1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
+}
+
 /// Returns `(key, hex, rgb)` entries from `color0..color15`, optionally filtering extreme
 /// black/white colors and rotating left by `offset`.
 pub fn active_palette_entries(
     palette: &PywalPalette,
     filter_extremes: bool,
     offset: usize,
+) -> Vec<(String, String, [u8; 3])> {
+    active_palette_entries_vivid(palette, filter_extremes, offset, 0.0)
+}
+
+/// Returns `(key, hex, rgb)` entries from `color0..color15`, optionally filtering extreme
+/// black/white colors, boosting HSV vividness by `saturate`, and rotating left by `offset`.
+pub fn active_palette_entries_vivid(
+    palette: &PywalPalette,
+    filter_extremes: bool,
+    offset: usize,
+    saturate: f32,
 ) -> Vec<(String, String, [u8; 3])> {
     let mut all: Vec<(String, String, [u8; 3])> = (0..16)
         .filter_map(|i| {
@@ -108,6 +187,15 @@ pub fn active_palette_entries(
         }
     }
 
+    let sat = normalize_saturate(saturate);
+    if sat > 0.0 {
+        for (_, hex, rgb) in &mut all {
+            let vivid = saturate_rgb(*rgb, sat);
+            *rgb = vivid;
+            *hex = rgb_to_hex(vivid);
+        }
+    }
+
     if !all.is_empty() {
         let shift = offset % all.len();
         all.rotate_left(shift);
@@ -115,23 +203,29 @@ pub fn active_palette_entries(
     all
 }
 
-fn select_primary_hex(palette: &PywalPalette, pywal: &PywalConfig) -> Option<String> {
+/// Resolves the primary RGB color chosen for automatic pywal synchronization.
+pub fn select_primary_pywal_rgb(palette: &PywalPalette, pywal: &PywalConfig) -> Option<[u8; 3]> {
+    let sat = normalize_saturate(pywal.saturate);
     if !pywal.filter_extremes && pywal.palette_offset == 0 {
         return palette
-            .color_hex("color4")
-            .or_else(|| palette.color_hex("color1"))
-            .map(str::to_string);
+            .color_rgb("color4")
+            .or_else(|| palette.color_rgb("color1"))
+            .map(|rgb| saturate_rgb(rgb, sat));
     }
-    active_palette_entries(palette, pywal.filter_extremes, pywal.palette_offset)
+    active_palette_entries_vivid(palette, pywal.filter_extremes, pywal.palette_offset, sat)
         .into_iter()
         .next()
-        .map(|(_, hex, _)| hex)
+        .map(|(_, _, rgb)| rgb)
         .or_else(|| {
             palette
-                .color_hex("color4")
-                .or_else(|| palette.color_hex("color1"))
-                .map(str::to_string)
+                .color_rgb("color4")
+                .or_else(|| palette.color_rgb("color1"))
+                .map(|rgb| saturate_rgb(rgb, sat))
         })
+}
+
+fn select_primary_hex(palette: &PywalPalette, pywal: &PywalConfig) -> Option<String> {
+    select_primary_pywal_rgb(palette, pywal).map(rgb_to_hex)
 }
 
 /// Applies colors from a [`PywalPalette`] to liquidctl devices according to [`PywalConfig`].
@@ -146,18 +240,23 @@ pub fn apply_pywal_palette(
     let mut applied = 0;
 
     if !pywal.targets.is_empty() {
+        let sat = normalize_saturate(pywal.saturate);
         for target in &pywal.targets {
-            let hex = palette.color_hex(&target.color_key).ok_or_else(|| {
+            let mut rgb = palette.color_rgb(&target.color_key).ok_or_else(|| {
                 CoreError::Validation(format!(
                     "pywal palette does not contain color key '{}'",
                     target.color_key
                 ))
             })?;
+            if sat > 0.0 {
+                rgb = saturate_rgb(rgb, sat);
+            }
+            let hex = rgb_to_hex(rgb);
             backend.set_color(
                 &target.match_device,
                 &target.channel,
                 &target.mode,
-                &[hex.to_string()],
+                &[hex],
                 dry_run,
             )?;
             applied += 1;
@@ -419,5 +518,37 @@ mod tests {
         let rotated = active_palette_entries(&palette, true, 1);
         assert_eq!(rotated[0].0, "color2");
         assert_eq!(rotated[1].0, "color1");
+    }
+
+    #[test]
+    fn saturate_rgb_boosts_vividness_and_preserves_neutrals() {
+        assert!((normalize_saturate(75.0) - 0.75).abs() < 1e-6);
+        assert!(normalize_saturate(-1.0).abs() < f32::EPSILON);
+
+        // Zero amount leaves color untouched
+        let muted = [0x56, 0x64, 0xa2];
+        assert_eq!(saturate_rgb(muted, 0.0), muted);
+
+        // Greyscale neutrals stay neutral
+        let grey = [0x77, 0x85, 0x9e]; // non-greyscale muted slate vs true neutral
+        let neutral = [120, 120, 120];
+        assert_eq!(saturate_rgb(neutral, 0.75), neutral);
+        assert_eq!(saturate_rgb([10, 10, 10], 1.0), [10, 10, 10]);
+
+        // Muted blue-slate becomes much more vivid (higher chroma & dominant channel)
+        let vivid = saturate_rgb(muted, 0.75);
+        let muted_chroma = muted.into_iter().max().unwrap() - muted.into_iter().min().unwrap();
+        let vivid_chroma = vivid.into_iter().max().unwrap() - vivid.into_iter().min().unwrap();
+        assert!(vivid_chroma > muted_chroma);
+        assert!(vivid[2] > muted[2]);
+
+        let vivid_slate = saturate_rgb(grey, 0.8);
+        assert!(vivid_slate[2] >= grey[2]);
+
+        let palette = parse_pywal_colors_json(SAMPLE_WAL_JSON).expect("valid pywal json");
+        let entries = active_palette_entries_vivid(&palette, true, 0, 0.75);
+        assert_eq!(entries[0].0, "color1");
+        assert_ne!(entries[0].1, "a348b5");
+        assert_eq!(entries[0].1, rgb_to_hex(entries[0].2));
     }
 }

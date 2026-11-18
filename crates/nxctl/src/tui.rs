@@ -22,9 +22,9 @@ use nxctl_core::liquidctl::{
 };
 use nxctl_core::{
     DaemonStatus, HwmonFanInfo, HwmonSensorInfo, IpcRequest, IpcResponse, Language, NvidiaGpuInfo,
-    PywalPalette, active_palette_entries, apply_pywal_palette, evaluate_curve, list_hwmon_fans,
-    list_hwmon_sensors, list_liquidctl_lighting_info, list_nvidia_gpus, load_pywal_palette,
-    send_request,
+    PywalPalette, active_palette_entries_vivid, apply_pywal_palette, evaluate_curve,
+    list_hwmon_fans, list_hwmon_sensors, list_liquidctl_lighting_info, list_nvidia_gpus,
+    load_pywal_palette, normalize_saturate, select_primary_pywal_rgb, send_request,
 };
 use ratatui::Frame;
 use ratatui::Terminal;
@@ -349,10 +349,11 @@ impl TuiState {
             .pywal
             .as_ref()
             .map(|pal| {
-                active_palette_entries(
+                active_palette_entries_vivid(
                     pal,
                     self.config.pywal.filter_extremes,
                     self.config.pywal.palette_offset,
+                    self.config.pywal.saturate,
                 )
             })
             .unwrap_or_default()
@@ -766,6 +767,23 @@ fn map_rgb_key(state: &mut TuiState, code: KeyCode) -> KeyAction {
                 state.config.pywal.filter_extremes = !state.config.pywal.filter_extremes;
                 let len = state.pywal_entries().len();
                 clamp_index(&mut state.selected_swatch, len);
+                let msg = i18n::fmt_pywal_palette_updated(state.lang);
+                state.status_message = Some(msg.clone());
+                state.status_ok = true;
+                KeyAction::SaveConfig(msg)
+            }
+            KeyCode::Char('v') => {
+                let cur = normalize_saturate(state.config.pywal.saturate);
+                let next = if cur < 0.25 {
+                    0.5
+                } else if cur < 0.65 {
+                    0.75
+                } else if cur < 0.90 {
+                    1.0
+                } else {
+                    0.0
+                };
+                state.config.pywal.saturate = next;
                 let msg = i18n::fmt_pywal_palette_updated(state.lang);
                 state.status_message = Some(msg.clone());
                 state.status_ok = true;
@@ -1228,17 +1246,8 @@ fn execute_action(
         }
         KeyAction::SyncPywal => {
             if let Some(palette) = state.snapshot.pywal.clone() {
-                let entries = state.pywal_entries();
                 let mode = state.pywal_mode();
-                let primary_rgb = if !state.config.pywal.filter_extremes
-                    && state.config.pywal.palette_offset == 0
-                {
-                    palette
-                        .color_rgb("color4")
-                        .or_else(|| palette.color_rgb("color1"))
-                } else {
-                    entries.first().map(|(_, _, rgb)| *rgb)
-                };
+                let primary_rgb = select_primary_pywal_rgb(&palette, &state.config.pywal);
                 match apply_pywal_palette(backend, &state.config.pywal, &palette, state.dry_run) {
                     Ok(count) => {
                         if let Some([r, g, b]) = primary_rgb {
@@ -2320,6 +2329,17 @@ fn draw_pywal_card(frame: &mut Frame, state: &TuiState, area: Rect) {
                 Style::default().fg(TEXT_PRIMARY),
             ),
             Span::styled(
+                format!("[v] {} ", s.saturate_label),
+                Style::default().fg(TEXT_SECONDARY),
+            ),
+            Span::styled(
+                format!(
+                    "{:.0}%   ",
+                    normalize_saturate(state.config.pywal.saturate) * 100.0
+                ),
+                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
                 format!("[-/+] {} ", s.shift_palette),
                 Style::default().fg(TEXT_SECONDARY),
             ),
@@ -3067,6 +3087,16 @@ mod tests {
             KeyAction::SaveConfig(_)
         ));
         assert_eq!(s.config.pywal.filter_extremes, !prev_filter);
+        assert!(matches!(
+            map_key(&mut s, k(KeyCode::Char('v'))),
+            KeyAction::SaveConfig(_)
+        ));
+        assert!((s.config.pywal.saturate - 0.5).abs() < 1e-6);
+        assert!(matches!(
+            map_key(&mut s, k(KeyCode::Char('v'))),
+            KeyAction::SaveConfig(_)
+        ));
+        assert!((s.config.pywal.saturate - 0.75).abs() < 1e-6);
         assert!(matches!(
             map_key(&mut s, k(KeyCode::Char('+'))),
             KeyAction::SaveConfig(_)

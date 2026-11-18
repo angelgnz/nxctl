@@ -70,7 +70,7 @@ pub struct PywalTarget {
 }
 
 /// Optional pywal (`~/.cache/wal/colors.json`) synchronization configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PywalConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -83,6 +83,8 @@ pub struct PywalConfig {
     #[serde(default)]
     pub palette_offset: usize,
     #[serde(default)]
+    pub saturate: f32,
+    #[serde(default)]
     pub targets: Vec<PywalTarget>,
 }
 
@@ -94,6 +96,7 @@ impl Default for PywalConfig {
             mode: default_pywal_mode(),
             filter_extremes: false,
             palette_offset: 0,
+            saturate: 0.0,
             targets: Vec::new(),
         }
     }
@@ -365,6 +368,11 @@ impl Config {
         }
         if let Some(sensor) = &self.daemon.temp_sensor {
             validate_sensor_ref(sensor, "daemon.temp_sensor")?;
+        }
+        if !self.pywal.saturate.is_finite() || !(0.0..=100.0).contains(&self.pywal.saturate) {
+            return Err(CoreError::Validation(
+                "pywal.saturate must be between 0.0 and 1.0 (or 0..100)".to_string(),
+            ));
         }
 
         for (curve_name, curve) in &self.curves {
@@ -1257,6 +1265,7 @@ default_profile = "default"
         let cfg: Config = toml::from_str(minimal_toml).expect("existing toml without pywal");
         assert!(!cfg.pywal.enabled);
         assert_eq!(cfg.pywal.colors_path, None);
+        assert!(cfg.pywal.saturate.abs() < f32::EPSILON);
         assert!(cfg.pywal.targets.is_empty());
 
         let with_pywal = r#"
@@ -1265,6 +1274,7 @@ default_profile = "default"
 [pywal]
 enabled = true
 colors_path = "/tmp/wal/colors.json"
+saturate = 0.75
 
 [[pywal.targets]]
 match_device = "kraken"
@@ -1275,6 +1285,7 @@ match_device = "kraken"
             cfg2.pywal.colors_path.as_deref(),
             Some("/tmp/wal/colors.json")
         );
+        assert!((cfg2.pywal.saturate - 0.75).abs() < 1e-6);
         assert_eq!(cfg2.pywal.targets.len(), 1);
         assert_eq!(cfg2.pywal.targets[0].match_device, "kraken");
         assert_eq!(cfg2.pywal.targets[0].channel, "sync");

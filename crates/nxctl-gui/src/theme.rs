@@ -375,6 +375,145 @@ pub fn draw_sync_icon(ui: &mut egui::Ui, size: f32, color: Color32) {
     painter.circle_filled(c + Vec2::new(0.0, r), node_r, color);
 }
 
+/// Draws a clickable pushpin icon button:
+/// - `pinned == true`: filled with `accent` color.
+/// - `pinned == false`: unfilled grey outline (`TEXT_MUTED`).
+pub fn pin_button(ui: &mut egui::Ui, pinned: bool, accent: Color32, tooltip: &str) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
+    let resp = resp
+        .on_hover_text(tooltip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let painter = ui.painter();
+
+    if resp.hovered() {
+        painter.rect_filled(rect, CornerRadius::same(4), BG_CONTROL);
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(4),
+            Stroke::new(1.0, BORDER_ACTIVE),
+            StrokeKind::Inside,
+        );
+    }
+
+    let c = rect.center();
+    let stroke_col = if pinned {
+        accent
+    } else if resp.hovered() {
+        TEXT_SECONDARY
+    } else {
+        TEXT_MUTED
+    };
+    let fill_col = if pinned { accent } else { Color32::TRANSPARENT };
+
+    // Top rim bar of the pushpin
+    painter.line_segment(
+        [
+            Pos2::new(c.x - 4.0, c.y - 4.8),
+            Pos2::new(c.x + 4.0, c.y - 4.8),
+        ],
+        Stroke::new(1.8, stroke_col),
+    );
+
+    // Flared trapezoid body (filled when pinned, hollow grey when unpinned)
+    let body = vec![
+        Pos2::new(c.x - 2.6, c.y - 4.8),
+        Pos2::new(c.x + 2.6, c.y - 4.8),
+        Pos2::new(c.x + 4.6, c.y + 1.2),
+        Pos2::new(c.x - 4.6, c.y + 1.2),
+    ];
+    painter.add(Shape::convex_polygon(
+        body,
+        fill_col,
+        Stroke::new(1.3, stroke_col),
+    ));
+
+    // Bottom pin needle
+    painter.line_segment(
+        [Pos2::new(c.x, c.y + 1.2), Pos2::new(c.x, c.y + 6.0)],
+        Stroke::new(1.5, stroke_col),
+    );
+
+    resp.clicked()
+}
+
+/// Draws a 2x3 grip dot handle for dragging dashboard cards.
+pub fn drag_handle(ui: &mut egui::Ui, id: egui::Id, tooltip: &str) -> egui::Response {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 18.0), Sense::hover());
+    let resp = ui
+        .interact(rect, id, Sense::drag())
+        .on_hover_text(tooltip)
+        .on_hover_cursor(egui::CursorIcon::Grab);
+    if resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+
+    let c = rect.center();
+    let col = if resp.dragged() || resp.hovered() {
+        CYAN
+    } else {
+        TEXT_MUTED
+    };
+    let painter = ui.painter();
+    for dy in [-4.5, 0.0, 4.5] {
+        for dx in [-2.5, 2.5] {
+            painter.circle_filled(Pos2::new(c.x + dx, c.y + dy), 1.4, col);
+        }
+    }
+
+    resp
+}
+
+/// Draws a bottom-edge resize handle for a dashboard card and returns the clamped height.
+pub fn card_resize_handle(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    current_h: f32,
+    min_h: f32,
+    max_h: f32,
+) -> f32 {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), Sense::hover());
+    let resp = ui
+        .interact(rect, id, Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    if resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+
+    let col = if resp.hovered() || resp.dragged() {
+        CYAN
+    } else {
+        BORDER_ACTIVE
+    };
+    let pill = Rect::from_center_size(rect.center(), Vec2::new(28.0, 2.0));
+    ui.painter().rect_filled(pill, CornerRadius::same(1), col);
+
+    (current_h + resp.drag_delta().y).clamp(min_h, max_h)
+}
+
+/// Draws a vertical column splitter handle and returns its interaction response.
+pub fn column_splitter(ui: &mut egui::Ui, id: egui::Id, height: f32) -> egui::Response {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(8.0, height.max(120.0)), Sense::hover());
+    let resp = ui
+        .interact(rect, id, Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    if resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+
+    let col = if resp.hovered() || resp.dragged() {
+        CYAN
+    } else {
+        BORDER_MUTED
+    };
+    let bar = Rect::from_center_size(
+        rect.center(),
+        Vec2::new(2.0, (rect.height() - 16.0).max(24.0)),
+    );
+    ui.painter().rect_filled(bar, CornerRadius::same(1), col);
+
+    resp
+}
+
 /// Draws a titled PWM bar with fan/pump icon and RPM / duty readout.
 pub fn draw_pwm_bar(
     ui: &mut egui::Ui,

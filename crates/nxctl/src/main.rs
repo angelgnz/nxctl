@@ -13,7 +13,8 @@ use nxctl_core::engine::{ApplyReport, apply_profile};
 use nxctl_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
 use nxctl_core::{
     IpcRequest, IpcResponse, Language, apply_pywal_palette, default_socket_path, list_hwmon_fans,
-    list_hwmon_sensors, list_nvidia_gpus, load_pywal_palette, send_request,
+    list_hwmon_sensors, list_nvidia_gpus, load_pywal_palette, normalize_saturate, rgb_to_hex,
+    saturate_rgb, send_request,
 };
 
 #[derive(Parser)]
@@ -101,6 +102,9 @@ enum Command {
         /// Ruta al archivo colors.json de pywal
         #[arg(long)]
         path: Option<PathBuf>,
+        /// Aumenta la saturación/viveza de los colores (0.0..=1.0 o 0..=100)
+        #[arg(long)]
+        saturate: Option<f32>,
     },
 }
 
@@ -570,25 +574,45 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Pywal { apply, json, path } => {
+        Command::Pywal {
+            apply,
+            json,
+            path,
+            saturate,
+        } => {
             let lang = resolve_lang(cli.lang, cfg_path);
             let s = i18n::cli(lang);
             let palette = load_pywal_palette(path.as_deref()).context(s.err_loading_pywal)?;
+            let mut config = Config::load(cfg_path).unwrap_or_else(|_| Config::starter_nzxt());
+            if let Some(sat) = saturate {
+                config.pywal.saturate = sat;
+            }
+            let effective_sat = normalize_saturate(config.pywal.saturate);
+            let mut display_palette = palette.clone();
+            if effective_sat > 0.0 {
+                for i in 0..16 {
+                    let key = format!("color{i}");
+                    if let Some(rgb) = palette.color_rgb(&key) {
+                        display_palette
+                            .colors
+                            .insert(key, rgb_to_hex(saturate_rgb(rgb, effective_sat)));
+                    }
+                }
+            }
             if json {
-                println!("{}", serde_json::to_string_pretty(&palette)?);
+                println!("{}", serde_json::to_string_pretty(&display_palette)?);
             } else {
-                if let Some(wp) = &palette.wallpaper {
+                if let Some(wp) = &display_palette.wallpaper {
                     println!("Wallpaper: {wp}");
                 }
                 for i in 0..16 {
                     let key = format!("color{i}");
-                    if let Some(hex) = palette.color_hex(&key) {
+                    if let Some(hex) = display_palette.color_hex(&key) {
                         println!("{key}: #{hex}");
                     }
                 }
             }
             if apply {
-                let config = Config::load(cfg_path).unwrap_or_else(|_| Config::starter_nzxt());
                 let applied = apply_pywal_palette(&backend, &config.pywal, &palette, cli.dry_run)?;
                 if !json {
                     println!("{}", i18n::fmt_pywal_applied(lang, applied));
@@ -619,14 +643,16 @@ mod tests {
             }
         ));
 
-        let pywal_apply = Cli::try_parse_from(["nxctl", "pywal", "--apply"]).unwrap();
+        let pywal_apply =
+            Cli::try_parse_from(["nxctl", "pywal", "--apply", "--saturate", "0.75"]).unwrap();
         assert!(matches!(
             pywal_apply.command,
             Command::Pywal {
                 apply: true,
                 json: false,
-                path: None
-            }
+                path: None,
+                saturate: Some(s),
+            } if (s - 0.75).abs() < 1e-6
         ));
 
         let init_dev = Cli::try_parse_from(["nxctl", "init-devices", "--match", "kraken"]).unwrap();

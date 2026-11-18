@@ -19,8 +19,8 @@ use egui_plot::{HLine, Line, Plot, PlotPoints, Points, VLine};
 use nxctl_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
 use nxctl_core::{
     Config, CoolingRule, CoolingTarget, FanCurve, IpcRequest, IpcResponse, Language, LightingRule,
-    Profile, active_palette_entries, apply_profile, apply_pywal_palette, default_socket_path,
-    evaluate_curve, load_pywal_palette, send_request,
+    Profile, active_palette_entries_vivid, apply_profile, apply_pywal_palette, default_socket_path,
+    evaluate_curve, load_pywal_palette, normalize_saturate, select_primary_pywal_rgb, send_request,
 };
 
 use poller::{ChannelInfo, HISTORY_LEN, Poller, Snapshot, hwmon_sensor_id};
@@ -125,10 +125,113 @@ struct NxctlApp {
     tray: TrayHandle,
     window_visible: bool,
     force_quit: bool,
+    dashboard_split_ratio: f32,
+    dashboard_card_heights: HashMap<String, f32>,
+    dashboard_panel_col: HashMap<String, usize>,
+    dashboard_panel_order: Vec<String>,
+    dragging_panel: Option<String>,
 }
+
+const PANEL_PWM_ID: &str = "panel:pwm";
+const PANEL_OTHER_ID: &str = "panel:other";
+const DEFAULT_TEMP_CARD_HEIGHT: f32 = 132.0;
 
 fn should_intercept_close_to_tray(close_to_tray: bool, force_quit: bool) -> bool {
     close_to_tray && !force_quit
+}
+
+fn default_dashboard_panel_order() -> Vec<String> {
+    vec![
+        "cpu".into(),
+        "gpu".into(),
+        "aio".into(),
+        PANEL_PWM_ID.into(),
+        PANEL_OTHER_ID.into(),
+    ]
+}
+
+fn default_dashboard_panel_cols() -> HashMap<String, usize> {
+    HashMap::from([
+        ("cpu".into(), 0),
+        ("gpu".into(), 0),
+        ("aio".into(), 0),
+        (PANEL_PWM_ID.into(), 1),
+        (PANEL_OTHER_ID.into(), 1),
+    ])
+}
+
+fn sync_dashboard_panels(
+    featured: &[String],
+    order: &mut Vec<String>,
+    cols: &mut HashMap<String, usize>,
+) {
+    order.retain(|id| id == PANEL_PWM_ID || id == PANEL_OTHER_ID || is_featured(featured, id));
+    for id in featured {
+        if !order.iter().any(|existing| existing == id) {
+            order.push(id.clone());
+        }
+        cols.entry(id.clone()).or_insert(0);
+    }
+    for static_id in [PANEL_PWM_ID, PANEL_OTHER_ID] {
+        if !order.iter().any(|existing| existing == static_id) {
+            order.push(static_id.to_string());
+        }
+        cols.entry(static_id.to_string()).or_insert(1);
+    }
+}
+
+fn move_dashboard_panel(
+    order: &mut Vec<String>,
+    cols: &mut HashMap<String, usize>,
+    dragged: &str,
+    target: Option<&str>,
+    target_col: usize,
+) {
+    let col = target_col.min(1);
+    let Some(orig_idx) = order.iter().position(|id| id == dragged) else {
+        return;
+    };
+    let orig_col = cols.get(dragged).copied().unwrap_or(0);
+    cols.insert(dragged.to_string(), col);
+
+    if target == Some(dragged) {
+        return;
+    }
+
+    let target_orig_idx = target.and_then(|tgt| order.iter().position(|id| id == tgt));
+    let item = order.remove(orig_idx);
+
+    match target.and_then(|tgt| order.iter().position(|id| id == tgt)) {
+        Some(new_target_idx) => {
+            let moving_down_same_col =
+                orig_col == col && target_orig_idx.is_some_and(|t_idx| orig_idx < t_idx);
+            let insert_idx = if moving_down_same_col {
+                new_target_idx + 1
+            } else {
+                new_target_idx
+            };
+            order.insert(insert_idx.min(order.len()), item);
+        }
+        None => order.push(item),
+    }
+}
+
+fn resolve_featured_device_name(id: &str, snap: &Snapshot) -> Option<String> {
+    let clean = |s: &str| {
+        let t = s.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    };
+    match id {
+        "cpu" => snap.cpu_model.as_deref().and_then(clean),
+        "gpu" => snap.nvidia.first().and_then(|g| clean(&g.name)),
+        "aio" => snap.aio_model.as_deref().and_then(clean),
+        other => snap
+            .hwmon
+            .iter()
+            .find(|s| hwmon_sensor_id(s) == other)
+            .and_then(|s| snap.hwmon_models.get(&s.device_dir))
+            .and_then(|m| clean(m)),
+    }
 }
 
 fn default_featured_sensors() -> Vec<String> {
@@ -329,6 +432,11 @@ impl NxctlApp {
             tray: TrayHandle::spawn(cc.egui_ctx.clone(), initial_lang),
             window_visible: !cli.minimized,
             force_quit: false,
+            dashboard_split_ratio: 0.50,
+            dashboard_card_heights: HashMap::new(),
+            dashboard_panel_col: default_dashboard_panel_cols(),
+            dashboard_panel_order: default_dashboard_panel_order(),
+            dragging_panel: None,
         }
     }
 
@@ -719,118 +827,175 @@ impl NxctlApp {
         let lang = self.config.language;
         let t = i18n::tr(lang);
         let snap = self.snap.clone();
-        let empty_hist = VecDeque::new();
+        sync_dashboard_panels(
+            &self.featured_sensors,
+            &mut self.dashboard_panel_order,
+            &mut self.dashboard_panel_col,
+        );
+
+        let col0_ids: Vec<String> = self
+            .dashboard_panel_order
+            .iter()
+            .filter(|id| self.dashboard_panel_col.get(*id).copied().unwrap_or(0) == 0)
+            .cloned()
+            .collect();
+        let col1_ids: Vec<String> = self
+            .dashboard_panel_order
+            .iter()
+            .filter(|id| self.dashboard_panel_col.get(*id).copied().unwrap_or(0) == 1)
+            .cloned()
+            .collect();
+
+        let total_w = ui.available_width();
+        let avail = (total_w - 16.0).max(200.0);
+        let ratio = self.dashboard_split_ratio.clamp(0.25, 0.75);
+        let left_w = (avail * ratio).floor();
+        let right_w = (avail - left_w).max(100.0);
+        let splitter_h = ui.available_height().max(320.0);
+
         let mut to_demote: Option<String> = None;
-        let featured_snapshot = self.featured_sensors.clone();
-        ui.columns(2, |cols| {
-            let ui = &mut cols[0];
-            for id in &featured_snapshot {
-                match id.as_str() {
-                    "cpu" => {
-                        if temp_card(
+        let mut to_promote: Option<String> = None;
+        let mut drag_started_id: Option<String> = None;
+        let mut rendered_panels: Vec<(String, usize, egui::Rect)> = Vec::new();
+        let mut splitter_x = left_w;
+        let mut col_rects = [egui::Rect::NOTHING, egui::Rect::NOTHING];
+
+        let active_drag = self.dragging_panel.clone();
+        let heights = &mut self.dashboard_card_heights;
+        let featured = &self.featured_sensors;
+
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+
+            let left_resp = ui.allocate_ui_with_layout(
+                egui::vec2(left_w, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_width(left_w);
+                    ui.set_max_width(left_w);
+                    for id in &col0_ids {
+                        render_dashboard_panel_by_id(
                             ui,
-                            "cpu",
-                            DashboardIcon::Cpu,
-                            "CPU",
-                            snap.cpu_c,
-                            100.0,
-                            "PACKAGE",
-                            CYAN,
-                            &snap.cpu_history,
-                            t.demote,
-                        ) {
-                            to_demote = Some("cpu".into());
-                        }
-                        ui.add_space(8.0);
+                            id,
+                            0,
+                            &snap,
+                            featured,
+                            lang,
+                            t,
+                            heights,
+                            active_drag.as_deref(),
+                            &mut to_demote,
+                            &mut to_promote,
+                            &mut drag_started_id,
+                            &mut rendered_panels,
+                        );
                     }
-                    "gpu" => {
-                        if temp_card(
-                            ui,
-                            "gpu",
-                            DashboardIcon::Gpu,
-                            "GPU",
-                            snap.gpu_c,
-                            100.0,
-                            "NVIDIA",
-                            MAGENTA,
-                            &snap.gpu_history,
-                            t.demote,
-                        ) {
-                            to_demote = Some("gpu".into());
-                        }
-                        ui.add_space(8.0);
-                    }
-                    "aio" => {
-                        if snap.liquid_c.is_some() {
-                            if temp_card(
-                                ui,
-                                "aio",
-                                DashboardIcon::Pump,
-                                t.aio_liquid,
-                                snap.liquid_c,
-                                100.0,
-                                t.liquid_sub,
-                                EMERALD,
-                                &snap.liquid_history,
-                                t.demote,
-                            ) {
-                                to_demote = Some("aio".into());
-                            }
-                            ui.add_space(8.0);
-                        }
-                    }
-                    _ => {
-                        if let Some(s) = snap.hwmon.iter().find(|s| hwmon_sensor_id(s) == *id) {
-                            let (tag, accent) = classify_hwmon_sensor(&s.name, lang);
-                            let icon = if tag == "iGPU" {
-                                DashboardIcon::Gpu
-                            } else {
-                                DashboardIcon::Sensor
-                            };
-                            let label = s.label.as_deref().unwrap_or(&s.input_file);
-                            let title = format!("{} ({label})", s.name);
-                            let hist = snap.hwmon_history.get(id).unwrap_or(&empty_hist);
-                            if temp_card(
-                                ui,
-                                id,
-                                icon,
-                                &title,
-                                Some(s.temp_c),
-                                100.0,
-                                tag,
-                                accent,
-                                hist,
-                                t.demote,
-                            ) {
-                                to_demote = Some(id.clone());
-                            }
-                            ui.add_space(8.0);
-                        }
-                    }
-                }
+                },
+            );
+            col_rects[0] = left_resp.response.rect;
+
+            let split_resp = column_splitter(ui, egui::Id::unique("dash_col_splitter"), splitter_h);
+            splitter_x = split_resp.rect.center().x;
+            if split_resp.dragged() {
+                self.dashboard_split_ratio =
+                    ((left_w + split_resp.drag_delta().x) / avail).clamp(0.25, 0.75);
+            }
+            if split_resp.double_clicked() {
+                self.dashboard_split_ratio = 0.50;
             }
 
-            let ui = &mut cols[1];
-            card_frame().show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    draw_fan_icon(ui, 15.0, CYAN);
-                    card_title(ui, t.pwm_headers);
-                });
-                if snap.channels.is_empty() {
-                    small_muted(ui, t.no_nzxt_channels);
-                }
-                for c in &snap.channels {
-                    let is_pump = is_pump_channel(&c.channel);
-                    let accent = if is_pump { MAGENTA } else { CYAN };
-                    draw_pwm_bar(ui, &c.label, c.rpm, c.duty.unwrap_or(0.0), accent, is_pump);
-                }
-            });
-            ui.add_space(8.0);
-            other_sensors_card(ui, &snap, &mut self.featured_sensors, lang);
+            let right_resp = ui.allocate_ui_with_layout(
+                egui::vec2(right_w, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_width(right_w);
+                    ui.set_max_width(right_w);
+                    for id in &col1_ids {
+                        render_dashboard_panel_by_id(
+                            ui,
+                            id,
+                            1,
+                            &snap,
+                            featured,
+                            lang,
+                            t,
+                            heights,
+                            active_drag.as_deref(),
+                            &mut to_demote,
+                            &mut to_promote,
+                            &mut drag_started_id,
+                            &mut rendered_panels,
+                        );
+                    }
+                },
+            );
+            col_rects[1] = right_resp.response.rect;
         });
+
+        if let Some(started) = drag_started_id {
+            self.dragging_panel = Some(started);
+        }
+
+        if let Some(dragged_id) = self.dragging_panel.clone() {
+            let pointer_pos = ui.ctx().pointer_interact_pos();
+            let hit = pointer_pos.and_then(|pos| {
+                rendered_panels
+                    .iter()
+                    .find(|(pid, _, rect)| pid != &dragged_id && rect.contains(pos))
+                    .map(|(pid, pcol, rect)| (pid.clone(), *pcol, *rect))
+            });
+            let target_col = if let Some((_, pcol, _)) = &hit {
+                *pcol
+            } else if pointer_pos.is_some_and(|p| p.x < splitter_x) {
+                0
+            } else {
+                1
+            };
+
+            if let Some((_, _, target_rect)) = hit {
+                ui.painter().rect_stroke(
+                    target_rect,
+                    egui::CornerRadius::same(6),
+                    egui::Stroke::new(1.5, CYAN.gamma_multiply(0.8)),
+                    egui::StrokeKind::Inside,
+                );
+            } else if col_rects[target_col] != egui::Rect::NOTHING {
+                let drop_rect = egui::Rect::from_min_max(
+                    col_rects[target_col].min,
+                    egui::pos2(
+                        col_rects[target_col].max.x,
+                        col_rects[target_col]
+                            .max
+                            .y
+                            .max(col_rects[target_col].min.y + 60.0),
+                    ),
+                );
+                ui.painter().rect_stroke(
+                    drop_rect,
+                    egui::CornerRadius::same(6),
+                    egui::Stroke::new(1.2, CYAN.gamma_multiply(0.55)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+
+            if ui.input(|i| i.pointer.any_released() || !i.pointer.any_down()) {
+                let target_id = hit.as_ref().map(|(pid, _, _)| pid.as_str());
+                move_dashboard_panel(
+                    &mut self.dashboard_panel_order,
+                    &mut self.dashboard_panel_col,
+                    &dragged_id,
+                    target_id,
+                    target_col,
+                );
+                self.dragging_panel = None;
+            }
+        }
+
         if let Some(id) = to_demote {
             demote_sensor(&mut self.featured_sensors, &id);
+        }
+        if let Some(id) = to_promote {
+            promote_sensor(&mut self.featured_sensors, &id);
         }
     }
 
@@ -1162,10 +1327,30 @@ impl NxctlApp {
                                 self.config.pywal.filter_extremes = filter_extremes;
                                 palette_changed = true;
                             }
-                            let entries = active_palette_entries(
+                            ui.separator();
+                            let mut sat_pct =
+                                (normalize_saturate(self.config.pywal.saturate) * 100.0).round();
+                            let mut sat_enabled = sat_pct > 0.0;
+                            if ui.checkbox(&mut sat_enabled, t.saturate_label).changed() {
+                                self.config.pywal.saturate = if sat_enabled { 0.75 } else { 0.0 };
+                                palette_changed = true;
+                            }
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut sat_pct, 0.0..=100.0)
+                                        .suffix("%")
+                                        .step_by(5.0),
+                                )
+                                .changed()
+                            {
+                                self.config.pywal.saturate = (sat_pct / 100.0).clamp(0.0, 1.0);
+                                palette_changed = true;
+                            }
+                            let entries = active_palette_entries_vivid(
                                 &palette,
                                 self.config.pywal.filter_extremes,
                                 self.config.pywal.palette_offset,
+                                self.config.pywal.saturate,
                             );
                             let len = entries.len().max(1);
                             ui.with_layout(
@@ -1203,10 +1388,11 @@ impl NxctlApp {
                             self.save_and_reload_config(i18n::pywal_palette_updated(lang));
                         }
 
-                        let entries = active_palette_entries(
+                        let entries = active_palette_entries_vivid(
                             &palette,
                             self.config.pywal.filter_extremes,
                             self.config.pywal.palette_offset,
+                            self.config.pywal.saturate,
                         );
 
                         ui.add_space(6.0);
@@ -1226,15 +1412,8 @@ impl NxctlApp {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui.button(t.sync_now).clicked() {
-                                        let primary_rgb = if !self.config.pywal.filter_extremes
-                                            && self.config.pywal.palette_offset == 0
-                                        {
-                                            palette
-                                                .color_rgb("color4")
-                                                .or_else(|| palette.color_rgb("color1"))
-                                        } else {
-                                            entries.first().map(|(_, _, rgb)| *rgb)
-                                        };
+                                        let primary_rgb =
+                                            select_primary_pywal_rgb(&palette, &self.config.pywal);
                                         if let Some([r, g, b]) = primary_rgb {
                                             let c = Color32::from_rgb(r, g, b);
                                             self.sync_rgb_rows(&snap, &devices, c, &pywal_mode);
@@ -1825,28 +2004,54 @@ fn draw_dashboard_icon(ui: &mut egui::Ui, icon: DashboardIcon, size: f32, color:
     }
 }
 
+struct TempCardOut {
+    demote: bool,
+    new_height: f32,
+    drag_started: bool,
+    card_rect: egui::Rect,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn temp_card(
     ui: &mut egui::Ui,
     id: &str,
     icon: DashboardIcon,
     title: &str,
+    device_name: Option<&str>,
     value: Option<f32>,
     max: f32,
     sub: &str,
     accent: Color32,
     history: &VecDeque<f64>,
+    plot_height: f32,
     demote_label: &str,
-) -> bool {
+    drag_tooltip: &str,
+    is_drag_source: bool,
+) -> TempCardOut {
     let mut demote = false;
-    card_frame().show(ui, |ui| {
+    let mut drag_started = false;
+    let mut new_height = plot_height;
+    let mut frame = card_frame();
+    if is_drag_source {
+        frame = frame.stroke(egui::Stroke::new(1.5, CYAN));
+    }
+    let frame_resp = frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
+            let drag_resp = drag_handle(ui, egui::Id::unique(("drag_card", id)), drag_tooltip);
+            drag_started = drag_resp.drag_started();
             draw_dashboard_icon(ui, icon, 15.0, accent);
             card_title(ui, title);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button(demote_label).clicked() {
+                if pin_button(ui, true, accent, demote_label) {
                     demote = true;
+                }
+                if let Some(dev_name) = device_name.map(str::trim).filter(|s| !s.is_empty()) {
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::Label::new(RichText::new(dev_name).color(TEXT_SECONDARY).size(11.0))
+                            .truncate(),
+                    );
                 }
             });
         });
@@ -1858,7 +2063,8 @@ fn temp_card(
                 .map(|(i, v)| [i as f64, *v])
                 .collect();
             Plot::new(format!("{id}_hist"))
-                .height(132.0)
+                .width(ui.available_width().max(60.0))
+                .height(plot_height)
                 .allow_drag(false)
                 .allow_zoom(false)
                 .allow_scroll(false)
@@ -1874,8 +2080,171 @@ fn temp_card(
                     );
                 });
         });
+        ui.add_space(2.0);
+        new_height = card_resize_handle(
+            ui,
+            egui::Id::unique(("resize_card", id)),
+            plot_height,
+            90.0,
+            340.0,
+        );
     });
-    demote
+    TempCardOut {
+        demote,
+        new_height,
+        drag_started,
+        card_rect: frame_resp.response.rect,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_dashboard_panel_by_id(
+    ui: &mut egui::Ui,
+    id: &str,
+    col_idx: usize,
+    snap: &Snapshot,
+    featured: &[String],
+    lang: Language,
+    t: &i18n::GuiStrings,
+    heights: &mut HashMap<String, f32>,
+    active_drag: Option<&str>,
+    to_demote: &mut Option<String>,
+    to_promote: &mut Option<String>,
+    drag_started_id: &mut Option<String>,
+    rendered_panels: &mut Vec<(String, usize, egui::Rect)>,
+) {
+    let is_drag_source = active_drag == Some(id);
+    match id {
+        PANEL_PWM_ID => {
+            let out = pwm_headers_card(
+                ui,
+                snap,
+                t,
+                heights.get(PANEL_PWM_ID).copied(),
+                is_drag_source,
+            );
+            if let Some(h) = out.new_height {
+                heights.insert(PANEL_PWM_ID.into(), h);
+            }
+            if out.drag_started {
+                *drag_started_id = Some(PANEL_PWM_ID.into());
+            }
+            rendered_panels.push((PANEL_PWM_ID.into(), col_idx, out.card_rect));
+            ui.add_space(8.0);
+        }
+        PANEL_OTHER_ID => {
+            let (promoted, out) = other_sensors_card(
+                ui,
+                snap,
+                featured,
+                lang,
+                heights.get(PANEL_OTHER_ID).copied(),
+                is_drag_source,
+            );
+            if let Some(pid) = promoted {
+                *to_promote = Some(pid);
+            }
+            if let Some(h) = out.new_height {
+                heights.insert(PANEL_OTHER_ID.into(), h);
+            }
+            if out.drag_started {
+                *drag_started_id = Some(PANEL_OTHER_ID.into());
+            }
+            rendered_panels.push((PANEL_OTHER_ID.into(), col_idx, out.card_rect));
+            ui.add_space(8.0);
+        }
+        _ => {
+            struct TempCardSpec<'a> {
+                icon: DashboardIcon,
+                title: String,
+                value: Option<f32>,
+                sub: &'a str,
+                accent: Color32,
+                hist: &'a VecDeque<f64>,
+            }
+            let empty_hist = VecDeque::new();
+            let plot_h = heights.get(id).copied().unwrap_or(DEFAULT_TEMP_CARD_HEIGHT);
+            let dev_name = resolve_featured_device_name(id, snap);
+            let card_spec = match id {
+                "cpu" => Some(TempCardSpec {
+                    icon: DashboardIcon::Cpu,
+                    title: "CPU".to_string(),
+                    value: snap.cpu_c,
+                    sub: "PACKAGE",
+                    accent: CYAN,
+                    hist: &snap.cpu_history,
+                }),
+                "gpu" => Some(TempCardSpec {
+                    icon: DashboardIcon::Gpu,
+                    title: "GPU".to_string(),
+                    value: snap.gpu_c,
+                    sub: "NVIDIA",
+                    accent: MAGENTA,
+                    hist: &snap.gpu_history,
+                }),
+                "aio" => snap.liquid_c.map(|temp| TempCardSpec {
+                    icon: DashboardIcon::Pump,
+                    title: t.aio_liquid.to_string(),
+                    value: Some(temp),
+                    sub: t.liquid_sub,
+                    accent: EMERALD,
+                    hist: &snap.liquid_history,
+                }),
+                other => snap
+                    .hwmon
+                    .iter()
+                    .find(|s| hwmon_sensor_id(s) == other)
+                    .map(|s| {
+                        let (tag, accent) = classify_hwmon_sensor(&s.name, lang);
+                        let icon = if tag == "iGPU" {
+                            DashboardIcon::Gpu
+                        } else {
+                            DashboardIcon::Sensor
+                        };
+                        let label = s.label.as_deref().unwrap_or(&s.input_file);
+                        let title = format!("{} ({label})", s.name);
+                        let hist = snap.hwmon_history.get(other).unwrap_or(&empty_hist);
+                        TempCardSpec {
+                            icon,
+                            title,
+                            value: Some(s.temp_c),
+                            sub: tag,
+                            accent,
+                            hist,
+                        }
+                    }),
+            };
+            if let Some(spec) = card_spec {
+                let out = temp_card(
+                    ui,
+                    id,
+                    spec.icon,
+                    &spec.title,
+                    dev_name.as_deref(),
+                    spec.value,
+                    100.0,
+                    spec.sub,
+                    spec.accent,
+                    spec.hist,
+                    plot_h,
+                    t.demote,
+                    t.drag_card_tooltip,
+                    is_drag_source,
+                );
+                if (out.new_height - plot_h).abs() > 0.5 || heights.contains_key(id) {
+                    heights.insert(id.to_string(), out.new_height);
+                }
+                if out.demote {
+                    *to_demote = Some(id.to_string());
+                }
+                if out.drag_started {
+                    *drag_started_id = Some(id.to_string());
+                }
+                rendered_panels.push((id.to_string(), col_idx, out.card_rect));
+                ui.add_space(8.0);
+            }
+        }
+    }
 }
 
 fn resolve_nxctld_binary_from(current_exe: Option<&Path>) -> PathBuf {
@@ -2048,7 +2417,7 @@ fn compact_sensor_row(
                 .size(11.0),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button(feature_label).clicked() {
+            if pin_button(ui, false, tag_color, feature_label) {
                 promote = true;
             }
             let txt = temp.map_or_else(|| "-- °C".to_string(), |t| format!("{t:.1} °C"));
@@ -2058,12 +2427,107 @@ fn compact_sensor_row(
     promote
 }
 
+struct CardRenderOut {
+    new_height: Option<f32>,
+    drag_started: bool,
+    card_rect: egui::Rect,
+}
+
+fn scrollable_dashboard_card(
+    ui: &mut egui::Ui,
+    panel_id: &str,
+    drag_tooltip: &str,
+    custom_height: Option<f32>,
+    is_drag_source: bool,
+    header: impl FnOnce(&mut egui::Ui),
+    body: impl FnOnce(&mut egui::Ui),
+) -> CardRenderOut {
+    let mut drag_started = false;
+    let mut new_height = None;
+    let mut frame = card_frame();
+    if is_drag_source {
+        frame = frame.stroke(egui::Stroke::new(1.5, CYAN));
+    }
+    let frame_resp = frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let drag_resp =
+                drag_handle(ui, egui::Id::unique(("drag_card", panel_id)), drag_tooltip);
+            drag_started = drag_resp.drag_started();
+            header(ui);
+        });
+        let cur_h = if let Some(h) = custom_height {
+            egui::ScrollArea::vertical()
+                .id_salt(("scroll_card", panel_id))
+                .max_height(h)
+                .min_scrolled_height(h)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_min_height(h);
+                    body(ui);
+                });
+            h
+        } else {
+            let body_resp = ui.scope(body);
+            body_resp.response.rect.height().clamp(80.0, 520.0)
+        };
+        ui.add_space(2.0);
+        let next_h = card_resize_handle(
+            ui,
+            egui::Id::unique(("resize_card", panel_id)),
+            cur_h,
+            80.0,
+            520.0,
+        );
+        if (next_h - cur_h).abs() > 0.5 || custom_height.is_some() {
+            new_height = Some(next_h);
+        }
+    });
+    CardRenderOut {
+        new_height,
+        drag_started,
+        card_rect: frame_resp.response.rect,
+    }
+}
+
+fn pwm_headers_card(
+    ui: &mut egui::Ui,
+    snap: &Snapshot,
+    t: &i18n::GuiStrings,
+    custom_height: Option<f32>,
+    is_drag_source: bool,
+) -> CardRenderOut {
+    scrollable_dashboard_card(
+        ui,
+        PANEL_PWM_ID,
+        t.drag_card_tooltip,
+        custom_height,
+        is_drag_source,
+        |ui| {
+            draw_fan_icon(ui, 15.0, CYAN);
+            card_title(ui, t.pwm_headers);
+        },
+        |ui| {
+            if snap.channels.is_empty() {
+                small_muted(ui, t.no_nzxt_channels);
+            }
+            for c in &snap.channels {
+                let is_pump = is_pump_channel(&c.channel);
+                let accent = if is_pump { MAGENTA } else { CYAN };
+                draw_pwm_bar(ui, &c.label, c.rpm, c.duty.unwrap_or(0.0), accent, is_pump);
+            }
+        },
+    )
+}
+
 fn other_sensors_card(
     ui: &mut egui::Ui,
     snap: &Snapshot,
-    featured: &mut Vec<String>,
+    featured: &[String],
     lang: Language,
-) {
+    custom_height: Option<f32>,
+    is_drag_source: bool,
+) -> (Option<String>, CardRenderOut) {
     let t = i18n::tr(lang);
     let show_cpu = !is_featured(featured, "cpu");
     let show_gpu = !is_featured(featured, "gpu");
@@ -2080,86 +2544,90 @@ fn other_sensors_card(
         usize::from(show_cpu) + usize::from(show_gpu) + usize::from(show_aio) + secondary.len();
 
     let mut to_promote: Option<String> = None;
-    card_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
+    let out = scrollable_dashboard_card(
+        ui,
+        PANEL_OTHER_ID,
+        t.drag_card_tooltip,
+        custom_height,
+        is_drag_source,
+        |ui| {
             draw_sensor_icon(ui, 15.0, CYAN);
             card_title(ui, t.other_sensors);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 badge(ui, &format!("{total}"), CYAN);
             });
-        });
-        if total == 0 {
-            small_muted(ui, t.no_additional_sensors);
-            return;
-        }
-        if show_cpu
-            && compact_sensor_row(
-                ui,
-                DashboardIcon::Cpu,
-                "CPU",
-                CYAN,
-                "CPU",
-                "PACKAGE",
-                snap.cpu_c,
-                t.feature,
-            )
-        {
-            to_promote = Some("cpu".into());
-        }
-        if show_gpu
-            && compact_sensor_row(
-                ui,
-                DashboardIcon::Gpu,
-                "GPU",
-                MAGENTA,
-                "GPU",
-                "NVIDIA",
-                snap.gpu_c,
-                t.feature,
-            )
-        {
-            to_promote = Some("gpu".into());
-        }
-        if show_aio
-            && compact_sensor_row(
-                ui,
-                DashboardIcon::Pump,
-                "AIO",
-                EMERALD,
-                "AIO",
-                t.liquid_label,
-                snap.liquid_c,
-                t.feature,
-            )
-        {
-            to_promote = Some("aio".into());
-        }
-        for (s, id) in secondary {
-            let (tag, tag_color) = classify_hwmon_sensor(&s.name, lang);
-            let icon = if tag == "iGPU" {
-                DashboardIcon::Gpu
-            } else {
-                DashboardIcon::Sensor
-            };
-            let label = s.label.as_deref().unwrap_or(&s.input_file);
-            if compact_sensor_row(
-                ui,
-                icon,
-                tag,
-                tag_color,
-                &s.name,
-                label,
-                Some(s.temp_c),
-                t.feature,
-            ) {
-                to_promote = Some(id);
+        },
+        |ui| {
+            if total == 0 {
+                small_muted(ui, t.no_additional_sensors);
+                return;
             }
-        }
-    });
-    if let Some(id) = to_promote {
-        promote_sensor(featured, &id);
-    }
+            if show_cpu
+                && compact_sensor_row(
+                    ui,
+                    DashboardIcon::Cpu,
+                    "CPU",
+                    CYAN,
+                    "CPU",
+                    "PACKAGE",
+                    snap.cpu_c,
+                    t.feature,
+                )
+            {
+                to_promote = Some("cpu".into());
+            }
+            if show_gpu
+                && compact_sensor_row(
+                    ui,
+                    DashboardIcon::Gpu,
+                    "GPU",
+                    MAGENTA,
+                    "GPU",
+                    "NVIDIA",
+                    snap.gpu_c,
+                    t.feature,
+                )
+            {
+                to_promote = Some("gpu".into());
+            }
+            if show_aio
+                && compact_sensor_row(
+                    ui,
+                    DashboardIcon::Pump,
+                    "AIO",
+                    EMERALD,
+                    "AIO",
+                    t.liquid_label,
+                    snap.liquid_c,
+                    t.feature,
+                )
+            {
+                to_promote = Some("aio".into());
+            }
+            for (s, id) in secondary {
+                let (tag, tag_color) = classify_hwmon_sensor(&s.name, lang);
+                let icon = if tag == "iGPU" {
+                    DashboardIcon::Gpu
+                } else {
+                    DashboardIcon::Sensor
+                };
+                let label = s.label.as_deref().unwrap_or(&s.input_file);
+                if compact_sensor_row(
+                    ui,
+                    icon,
+                    tag,
+                    tag_color,
+                    &s.name,
+                    label,
+                    Some(s.temp_c),
+                    t.feature,
+                ) {
+                    to_promote = Some(id);
+                }
+            }
+        },
+    );
+    (to_promote, out)
 }
 
 /// Returns `false` for built-in (`default`, `performance`, `silent`) or active default profiles.
@@ -2467,5 +2935,101 @@ mod liquid_tests {
         );
         assert_eq!(resolve_nxctld_binary_from(None), PathBuf::from("nxctld"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_featured_device_name_returns_models_or_none() {
+        let mut snap = Snapshot {
+            cpu_model: Some("AMD Ryzen 7 7700X 8-Core Processor".into()),
+            aio_model: Some("NZXT Kraken X (X53, X63 or X73)".into()),
+            nvidia: vec![nxctl_core::NvidiaGpuInfo {
+                index: 0,
+                name: "NVIDIA GeForce RTX 4070".into(),
+                temp_c: 42.0,
+            }],
+            hwmon: vec![
+                sensor("nvme", 38.0),
+                HwmonSensorInfo {
+                    device_dir: "hwmon6".into(),
+                    name: "amdgpu".into(),
+                    input_file: "temp1_input".into(),
+                    label: Some("edge".into()),
+                    temp_c: 34.0,
+                },
+            ],
+            ..Snapshot::default()
+        };
+        snap.hwmon_models
+            .insert("hwmon9".into(), "KINGSTON SNV2S1000G".into());
+        snap.hwmon_models.insert("hwmon6".into(), "   ".into());
+
+        assert_eq!(
+            resolve_featured_device_name("cpu", &snap).as_deref(),
+            Some("AMD Ryzen 7 7700X 8-Core Processor")
+        );
+        assert_eq!(
+            resolve_featured_device_name("gpu", &snap).as_deref(),
+            Some("NVIDIA GeForce RTX 4070")
+        );
+        assert_eq!(
+            resolve_featured_device_name("aio", &snap).as_deref(),
+            Some("NZXT Kraken X (X53, X63 or X73)")
+        );
+        assert_eq!(
+            resolve_featured_device_name("hwmon:hwmon9:temp1_input", &snap).as_deref(),
+            Some("KINGSTON SNV2S1000G")
+        );
+        assert_eq!(
+            resolve_featured_device_name("hwmon:hwmon6:temp1_input", &snap),
+            None
+        );
+
+        let empty = Snapshot::default();
+        assert_eq!(resolve_featured_device_name("cpu", &empty), None);
+        assert_eq!(resolve_featured_device_name("gpu", &empty), None);
+        assert_eq!(resolve_featured_device_name("aio", &empty), None);
+    }
+
+    #[test]
+    fn move_dashboard_panel_reorders_and_switches_columns() {
+        let mut order = default_dashboard_panel_order();
+        let mut cols = default_dashboard_panel_cols();
+        let mut featured = default_featured_sensors();
+
+        // Drag "cpu" downward onto "aio" inside column 0 -> moves after "aio".
+        move_dashboard_panel(&mut order, &mut cols, "cpu", Some("aio"), 0);
+        let col0: Vec<&str> = order
+            .iter()
+            .filter(|id| cols[*id] == 0)
+            .map(String::as_str)
+            .collect();
+        assert_eq!(col0, vec!["gpu", "aio", "cpu"]);
+
+        // Drag "cpu" upward onto "gpu" inside column 0 -> moves back to top.
+        move_dashboard_panel(&mut order, &mut cols, "cpu", Some("gpu"), 0);
+        let col0: Vec<&str> = order
+            .iter()
+            .filter(|id| cols[*id] == 0)
+            .map(String::as_str)
+            .collect();
+        assert_eq!(col0, vec!["cpu", "gpu", "aio"]);
+
+        // Move "gpu" across columns to column 1 before PANEL_OTHER_ID.
+        move_dashboard_panel(&mut order, &mut cols, "gpu", Some(PANEL_OTHER_ID), 1);
+        assert_eq!(cols["gpu"], 1);
+        let col1: Vec<&str> = order
+            .iter()
+            .filter(|id| cols[*id] == 1)
+            .map(String::as_str)
+            .collect();
+        assert_eq!(col1, vec![PANEL_PWM_ID, "gpu", PANEL_OTHER_ID]);
+
+        // Pinning and unpinning syncs order and columns cleanly.
+        promote_sensor(&mut featured, "hwmon:hwmon0:temp1_input");
+        sync_dashboard_panels(&featured, &mut order, &mut cols);
+        assert_eq!(cols["hwmon:hwmon0:temp1_input"], 0);
+        demote_sensor(&mut featured, "gpu");
+        sync_dashboard_panels(&featured, &mut order, &mut cols);
+        assert!(!order.iter().any(|id| id == "gpu"));
     }
 }

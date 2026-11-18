@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use nxctl_core::liquidctl::{
-    CliLiquidctlBackend, DeviceLightingInfo, DeviceStatus, LiquidctlBackend,
+    CliLiquidctlBackend, DeviceLightingInfo, DeviceStatus, LiquidctlBackend, StatusReading,
 };
 use nxctl_core::{
     DaemonStatus, HwmonFanInfo, HwmonSensorInfo, IpcRequest, IpcResponse, NvidiaGpuInfo,
@@ -127,21 +127,34 @@ pub fn extract_hwmon_channels(fans: &[HwmonFanInfo], devices: &[DeviceStatus]) -
     out
 }
 
+fn is_liquid_temp_reading(r: &StatusReading) -> bool {
+    let lower = r.key.to_ascii_lowercase();
+    (lower == "liquid temperature"
+        || lower.contains("liquid")
+        || lower.contains("coolant")
+        || lower.contains("water"))
+        && r.value.as_f64().is_some()
+}
+
 /// Finds the liquid/coolant temperature reading among device statuses.
 pub fn liquid_temp(devices: &[DeviceStatus]) -> Option<f32> {
     devices
         .iter()
         .flat_map(|d| d.status.iter())
-        .find(|r| {
-            let lower = r.key.to_ascii_lowercase();
-            (lower == "liquid temperature"
-                || lower.contains("liquid")
-                || lower.contains("coolant")
-                || lower.contains("water"))
-                && r.value.as_f64().is_some()
-        })
+        .find(|r| is_liquid_temp_reading(r))
         .and_then(|r| r.value.as_f64())
         .map(|v| v as f32)
+}
+
+/// Returns the description of the first device reporting a liquid/coolant temperature.
+pub fn liquid_device_name(devices: &[DeviceStatus]) -> Option<String> {
+    devices
+        .iter()
+        .find(|dev| dev.status.iter().any(is_liquid_temp_reading))
+        .and_then(|dev| {
+            let desc = dev.description.trim();
+            (!desc.is_empty()).then(|| desc.to_string())
+        })
 }
 
 /// Picks the CPU package temperature from hwmon sensors (`k10temp` / `coretemp` / `zenpower`).
@@ -182,6 +195,9 @@ pub struct Snapshot {
     pub liquid_c: Option<f32>,
     pub cpu_c: Option<f32>,
     pub gpu_c: Option<f32>,
+    pub cpu_model: Option<String>,
+    pub aio_model: Option<String>,
+    pub hwmon_models: HashMap<String, String>,
     pub liquid_history: VecDeque<f64>,
     pub cpu_history: VecDeque<f64>,
     pub gpu_history: VecDeque<f64>,
@@ -202,6 +218,8 @@ impl Poller {
         let (tx, rx) = mpsc::channel::<Arc<Snapshot>>();
         thread::spawn(move || {
             let backend = CliLiquidctlBackend::new();
+            let cpu_model = nxctl_core::read_cpu_model_name();
+            let mut cached_hwmon_models: HashMap<String, Option<String>> = HashMap::new();
             let mut liquid = VecDeque::new();
             let mut cpu = VecDeque::new();
             let mut gpu = VecDeque::new();
@@ -229,6 +247,15 @@ impl Poller {
                 snap.lighting_info = cached_lighting.clone();
 
                 snap.hwmon = list_hwmon_sensors().unwrap_or_default();
+                for s in &snap.hwmon {
+                    let model = cached_hwmon_models
+                        .entry(s.device_dir.clone())
+                        .or_insert_with(|| nxctl_core::hwmon_device_model(&s.device_dir));
+                    if let Some(model) = model {
+                        snap.hwmon_models
+                            .insert(s.device_dir.clone(), model.clone());
+                    }
+                }
                 let hwmon_fans = list_hwmon_fans().unwrap_or_default();
                 snap.nvidia = list_nvidia_gpus().unwrap_or_default();
                 snap.daemon = match send_request(&socket, &IpcRequest::Status) {
@@ -239,6 +266,8 @@ impl Poller {
                 snap.channels
                     .extend(extract_hwmon_channels(&hwmon_fans, &snap.devices));
                 snap.liquid_c = liquid_temp(&snap.devices);
+                snap.cpu_model = cpu_model.clone();
+                snap.aio_model = liquid_device_name(&snap.devices);
                 snap.cpu_c = cpu_temp(&snap.hwmon);
                 snap.gpu_c = gpu_temp(&snap.nvidia, &snap.hwmon);
                 if let Some(v) = snap.liquid_c {
@@ -284,7 +313,6 @@ impl Poller {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nxctl_core::StatusReading;
 
     #[test]
     fn history_is_capped() {
@@ -385,6 +413,61 @@ mod tests {
         let snap = Snapshot::default();
         assert!(snap.lighting_info.is_empty());
         assert!(snap.hwmon_history.is_empty());
+        assert!(snap.cpu_model.is_none());
+        assert!(snap.aio_model.is_none());
+        assert!(snap.hwmon_models.is_empty());
+    }
+
+    #[test]
+    fn liquid_device_name_matches_liquid_sensor_and_handles_missing_or_empty() {
+        let rd = |k: &str, v: serde_json::Value| StatusReading {
+            key: k.into(),
+            value: v,
+            unit: None,
+        };
+        let non_liquid = DeviceStatus {
+            address: None,
+            bus: None,
+            description: "NZXT Smart Device V2".into(),
+            status: vec![rd("Fan 1 speed", serde_json::json!(900.0))],
+        };
+        let kraken = DeviceStatus {
+            address: None,
+            bus: None,
+            description: "NZXT Kraken X63".into(),
+            status: vec![rd("Liquid temperature", serde_json::json!(32.5))],
+        };
+        let corsair = DeviceStatus {
+            address: None,
+            bus: None,
+            description: "  Corsair iCUE H150i  ".into(),
+            status: vec![rd("Coolant temp", serde_json::json!(29.0))],
+        };
+        let empty_desc = DeviceStatus {
+            address: None,
+            bus: None,
+            description: "   ".into(),
+            status: vec![rd("Water temperature", serde_json::json!(30.0))],
+        };
+        let non_numeric = DeviceStatus {
+            address: None,
+            bus: None,
+            description: "Invalid Liquid Device".into(),
+            status: vec![rd("Liquid temperature", serde_json::json!("N/A"))],
+        };
+
+        assert_eq!(liquid_device_name(&[]), None);
+        assert_eq!(liquid_device_name(std::slice::from_ref(&non_liquid)), None);
+        assert_eq!(liquid_device_name(&[non_numeric]), None);
+        assert_eq!(liquid_device_name(&[empty_desc]), None);
+        assert_eq!(
+            liquid_device_name(&[non_liquid, kraken]).as_deref(),
+            Some("NZXT Kraken X63")
+        );
+        assert_eq!(
+            liquid_device_name(&[corsair]).as_deref(),
+            Some("Corsair iCUE H150i")
+        );
     }
 
     #[test]

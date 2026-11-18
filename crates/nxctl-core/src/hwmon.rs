@@ -360,6 +360,43 @@ pub fn set_hwmon_pwm(hwmon: &str, channel: &str, duty: u8, dry_run: bool) -> Res
     set_hwmon_pwm_in(Path::new(HWMON_BASE), hwmon, channel, duty, dry_run)
 }
 
+/// Parses the host CPU model name from `/proc/cpuinfo` contents.
+///
+/// Prefers `model name` and falls back to `Hardware` or `Processor` for ARM/embedded platforms.
+pub fn parse_cpu_model_from_cpuinfo(cpuinfo: &str) -> Option<String> {
+    let find_key = |target: &str| -> Option<String> {
+        cpuinfo.lines().find_map(|line| {
+            let (key, val) = line.split_once(':')?;
+            if key.trim() != target {
+                return None;
+            }
+            let val = val.trim();
+            (!val.is_empty()).then(|| val.to_string())
+        })
+    };
+
+    find_key("model name")
+        .or_else(|| find_key("Hardware"))
+        .or_else(|| find_key("Processor"))
+}
+
+/// Reads the host CPU model name from `/proc/cpuinfo`.
+pub fn read_cpu_model_name() -> Option<String> {
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo").ok()?;
+    parse_cpu_model_from_cpuinfo(&cpuinfo)
+}
+
+/// Reads the trimmed `device/model` string for a hwmon directory under `base`.
+pub fn hwmon_device_model_in(base: &Path, device_dir: &str) -> Option<String> {
+    let model = read_trimmed(&base.join(device_dir).join("device").join("model"))?;
+    (!model.is_empty()).then_some(model)
+}
+
+/// Reads the trimmed `device/model` string for a hwmon directory under `/sys/class/hwmon`.
+pub fn hwmon_device_model(device_dir: &str) -> Option<String> {
+    hwmon_device_model_in(Path::new(HWMON_BASE), device_dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,6 +539,80 @@ mod tests {
             set_hwmon_pwm_in(&base, "nct6775", "pwm2", 50, false),
             Err(CoreError::Validation(_))
         ));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn parses_cpu_model_from_cpuinfo() {
+        let x86 = "\
+processor\t: 0
+vendor_id\t: AuthenticAMD
+model name\t: AMD Ryzen 9 7950X 16-Core Processor
+stepping\t: 2
+";
+        assert_eq!(
+            parse_cpu_model_from_cpuinfo(x86).as_deref(),
+            Some("AMD Ryzen 9 7950X 16-Core Processor")
+        );
+
+        let arm = "\
+Processor\t: ARMv7 Processor rev 3 (v7l)
+processor\t: 0
+Hardware\t: BCM2835
+Revision\t: a020d3
+";
+        assert_eq!(
+            parse_cpu_model_from_cpuinfo(arm).as_deref(),
+            Some("BCM2835")
+        );
+
+        let arm_with_model_name = "\
+Processor\t: Generic ARM
+model name\t: Cortex-A76
+Hardware\t: Raspberry Pi 5
+";
+        assert_eq!(
+            parse_cpu_model_from_cpuinfo(arm_with_model_name).as_deref(),
+            Some("Cortex-A76")
+        );
+
+        let processor_only = "Processor\t: ARMv7 Processor rev 4 (v7l)\n";
+        assert_eq!(
+            parse_cpu_model_from_cpuinfo(processor_only).as_deref(),
+            Some("ARMv7 Processor rev 4 (v7l)")
+        );
+
+        assert_eq!(parse_cpu_model_from_cpuinfo(""), None);
+        assert_eq!(parse_cpu_model_from_cpuinfo("model name\t:   \n"), None);
+    }
+
+    #[test]
+    fn reads_hwmon_device_model_in_base() {
+        let base = std::env::temp_dir().join(format!(
+            "nxctl_hwmon_model_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let present = base.join("hwmon0").join("device");
+        let blank = base.join("hwmon1").join("device");
+        let missing = base.join("hwmon2");
+        fs::create_dir_all(&present).unwrap();
+        fs::create_dir_all(&blank).unwrap();
+        fs::create_dir_all(&missing).unwrap();
+        fs::write(present.join("model"), "  Samsung SSD 990 PRO 2TB  \n").unwrap();
+        fs::write(blank.join("model"), "   \n\t").unwrap();
+
+        assert_eq!(
+            hwmon_device_model_in(&base, "hwmon0").as_deref(),
+            Some("Samsung SSD 990 PRO 2TB")
+        );
+        assert_eq!(hwmon_device_model_in(&base, "hwmon1"), None);
+        assert_eq!(hwmon_device_model_in(&base, "hwmon2"), None);
+        assert_eq!(hwmon_device_model_in(&base, "hwmon99"), None);
 
         let _ = fs::remove_dir_all(base);
     }

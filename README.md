@@ -11,11 +11,21 @@ Open-source Linux alternative to NZXT CAM, built on top of [liquidctl](https://g
 Launch the desktop application with:
 
 ```sh
-nxctl-gui [--lang es|en] [--view dashboard|fans|rgb|profiles] [--config PATH] [--socket PATH] [--dry-run]
+nxctl-gui [--lang es|en] [--view dashboard|fans|rgb|profiles] [--minimized|--tray] [--config PATH] [--socket PATH] [--dry-run]
 ```
 
+- **Zero-config startup**: on first launch, `nxctl-gui` (as well as `nxctld` and `nxctl tui`) automatically creates `~/.config/nxctl/config.toml` with safe detected defaults if none exists, and starts `nxctld` automatically when the daemon socket is not yet running.
+- **X11 System Tray & Background Mode**:
+  - Starts with a crisp white tray icon (pass `--minimized` or `--tray` to launch hidden in the tray).
+  - **Left-click** toggles window visibility, **scroll wheel up/down** cycles active profiles, and **right-click** opens a native **Open / Quit** context menu.
+  - Enable **Run in background** in the bottom-left sidebar card (`close_to_tray = true` in `config.toml`) so closing the window hides it to the tray instead of exiting.
+
 ### Dashboard
-Live radial gauges and rolling temperature history charts for CPU, GPU, and AIO coolant, PWM fan/pump headers, and secondary `hwmon` system sensors (NVMe, RAM, Wi-Fi, chipset, NIC) that can be promoted or demoted on the dashboard.
+Live radial gauges and rolling temperature history charts for CPU, GPU, and AIO coolant, PWM fan/pump headers, and secondary `hwmon` system sensors (NVMe, RAM, Wi-Fi, chipset, NIC):
+
+- **Pin / Unpin**: click the pushpin icon on any card or sensor row (filled accent color when pinned, grey outline when unpinned) to promote or demote it.
+- **Device Model Labels**: pinned cards display detected hardware model names (e.g. `AMD Ryzen 7 7700X 8-Core Processor`, `NVIDIA GeForce RTX 4070`, `NZXT Kraken X (X53, X63 or X73)`) to the left of the pin icon.
+- **Move & Resize Layout**: drag cards by their `⋮⋮` handles to reorder panels or move them across columns, drag the vertical column splitter to resize left/right column widths, and drag the bottom resize handle on any card to adjust its height.
 
 ![Dashboard](assets/screenshots/dashboard.png)
 
@@ -25,12 +35,12 @@ Grouped per-device fan curve plots with live operating-point overlay and per-cha
 ![Fans](assets/screenshots/fans.png)
 
 ### RGB Lighting
-Per-device and per-channel RGB mode/color controls plus **Pywal Sync** with live wallpaper palette swatches and automatic daemon synchronization.
+Per-device and per-channel RGB mode/color controls plus **Pywal Sync** with live wallpaper palette swatches, a **Saturate (vivid)** HSV chroma boost checkbox and `0%–100%` slider, palette offset controls, and automatic daemon synchronization.
 
 ![RGB Lighting](assets/screenshots/rgb.png)
 
 ### Profiles
-Create, capture from current state, clone, edit, import/export portable `.toml` profile bundles, and set the default profile.
+Create, capture from current state, clone, edit, import/export portable `.toml` profile bundles, set the default profile, or click **Auto-generate TOML** to regenerate `config.toml` from currently detected hardware (preserving your `language` and `close_to_tray` preferences).
 
 ![Profiles](assets/screenshots/profiles.png)
 
@@ -38,7 +48,7 @@ Create, capture from current state, clone, edit, import/export portable `.toml` 
 
 All user-facing tools (`nxctl-gui`, `nxctl`, and `nxctl tui`) support **English (`en`)** and **Spanish (`es`)**:
 
-- **Config file (`~/.config/nxctl/config.toml`)**: set `language = "en"` or `language = "es"` (defaults to `"es"` if omitted).
+- **Config file (`~/.config/nxctl/config.toml`)**: created automatically from detected hardware on first launch of `nxctld`, `nxctl-gui`, or `nxctl tui`; set `language = "en"` or `language = "es"` (defaults to `"es"` if omitted) and `close_to_tray = true` to hide to the system tray on close.
 - **GUI**: choose **English** / **Español** directly from the **LANGUAGE** selector in the bottom-left sidebar card (saved automatically to `config.toml`), or start with `nxctl-gui --lang en`.
 - **CLI**: pass `--lang en` or `--lang es` globally (for example, `nxctl --lang en sensors`), or set `NXCTL_LANG` / `LANG`.
 - **TUI**: press `l` inside `nxctl tui` to toggle between English and Spanish live.
@@ -104,7 +114,7 @@ nxctl daemon status [--socket PATH] [--json]
 nxctl daemon reload [--socket PATH]
 nxctl daemon reapply [--socket PATH]
 nxctl daemon profile <NAME> [--socket PATH]
-nxctl pywal [--apply] [--json] [--path PATH] # inspect or apply pywal colors
+nxctl pywal [--apply] [--json] [--path PATH] [--saturate VALUE] # inspect or apply pywal colors
 nxctl tui [--socket PATH] [--interval SECS]
 ```
 
@@ -169,8 +179,8 @@ nxctl pywal
 # Output the palette as JSON:
 nxctl pywal --json
 
-# Immediately apply the palette to configured devices:
-nxctl pywal --apply
+# Immediately apply the palette with vivid HSV saturation boost (0.0..1.0 or 0..100):
+nxctl pywal --apply --saturate 0.5
 
 # Specify a custom colors.json path:
 nxctl pywal --apply --path /path/to/colors.json
@@ -178,10 +188,16 @@ nxctl pywal --apply --path /path/to/colors.json
 
 #### In `config.toml` (automatic sync in `nxctld`)
 ```toml
+# Optional top-level preferences
+language = "en"
+close_to_tray = true
+
 [pywal]
 enabled = true
 # Optional path to colors.json (defaults to ~/.cache/wal/colors.json)
 # colors_path = "/home/user/.cache/wal/colors.json"
+# Vivid HSV saturation boost for chromatic swatches (0.0..1.0 or 0..100; near-neutral greys stay untouched)
+saturate = 0.5
 
 # Optional custom device/channel color mappings:
 # If targets is empty, applies color4 (or color1) in 'fixed' mode to the 'sync' channel of all detected devices.
@@ -198,9 +214,9 @@ color_key = "color2"
 mode = "fixed"
 ```
 
-When `pywal.enabled = true`, `nxctld` watches `colors.json` modification times and updates devices automatically without restarting the service.
+When `pywal.enabled = true`, `nxctld` watches `colors.json` modification times and updates devices automatically without restarting the service. Using `saturate` (`0.0..1.0` or `0..100`, CLI `--saturate`, GUI slider, or TUI `v` key) boosts HSV saturation and vibrance of chromatic pywal swatches for vivid LED output while preserving near-neutral blacks, greys, and whites.
 
-In `nxctl-gui`, the **RGB Lighting** view includes a **Pywal Sync** card to toggle automatic synchronization, filter near-black/white swatches, shift the palette offset, click any swatch to apply it globally, or trigger a manual sync.
+In `nxctl-gui`, the **RGB Lighting** view includes a **Pywal Sync** card to toggle automatic synchronization, filter near-black/white swatches, boost vividness with **Saturate (vivid)** (`0%–100%`), shift the palette offset, click any swatch to apply it globally, or trigger a manual sync.
 
 ## Rootless Permissions (`udev`)
 
@@ -263,4 +279,4 @@ Adjust the `--config` path in the system unit to match your installation.
 nxctl tui [--socket PATH] [--interval SECS]
 ```
 
-Keybindings: `q`/`Esc`/`Ctrl+C` quit · `↑`/`↓` or `j`/`k` navigate · `Enter`/`a` apply profile · `r` reload/refresh · `Tab` switch focus Profiles ↔ Sensors · `c` next curve (red dot marks current temperature) · `l` switch language (`ES`/`EN`) · `?` toggle help.
+Keybindings: `1`–`4` / `PageUp` / `PageDown` switch tabs · `q`/`Esc`/`Ctrl+C` quit · `↑`/`↓` or `j`/`k` navigate · `Enter`/`a` apply profile or color · `f` pin/unpin sensor (Dashboard) · `r` reload/refresh · `p` reapply active profile · `Tab` switch section focus · `c` cycle curve (Fans) or clone profile (Profiles) · `v` cycle Pywal vivid saturation (`RGB / Pywal`) · `x` filter extreme swatches · `s` sync Pywal · `g` auto-generate `config.toml` (`Profiles`) · `l` switch language (`ES`/`EN`) · `?` toggle help.

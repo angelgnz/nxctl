@@ -1,6 +1,6 @@
 # Maintainer: angelgnz <https://github.com/angelgnz/nxctl>
 pkgname=nxctl
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Open-source Linux alternative to NZXT CAM over liquidctl (CLI, TUI, daemon, and GUI)"
 arch=('x86_64')
