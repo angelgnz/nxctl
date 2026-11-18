@@ -21,7 +21,9 @@ mkdir -p \
   "${REPO_DIR}/arch/x86_64"
 
 touch "${REPO_DIR}/.nojekyll"
-install -m644 "${SCRIPT_DIR}/index.html" "${REPO_DIR}/index.html"
+if [ -f "${SCRIPT_DIR}/index.html" ] && [ ! -f "${REPO_DIR}/index.html" ]; then
+  install -m644 "${SCRIPT_DIR}/index.html" "${REPO_DIR}/index.html"
+fi
 install -m644 "${SCRIPT_DIR}/gpg.key" "${REPO_DIR}/gpg.key"
 gpg --batch --yes --dearmor -o "${REPO_DIR}/gpg.gpg" "${REPO_DIR}/gpg.key"
 
@@ -32,6 +34,7 @@ if [ "${#debs[@]}" -eq 0 ]; then
   echo "error: no .deb packages found in ${DIST_DIR}" >&2
   exit 1
 fi
+rm -f "${REPO_DIR}/apt/pool/main/n/nxctl/nxctl_"*.deb
 cp -f "${debs[@]}" "${REPO_DIR}/apt/pool/main/n/nxctl/"
 
 (
@@ -68,6 +71,7 @@ if [ "${#rpms[@]}" -eq 0 ]; then
   echo "error: no .rpm packages found in ${DIST_DIR}" >&2
   exit 1
 fi
+rm -f "${REPO_DIR}/rpm/Packages/nxctl-"*.rpm
 for rpm_file in "${rpms[@]}"; do
   dest_rpm="${REPO_DIR}/rpm/Packages/$(basename "${rpm_file}")"
   cp -f "${rpm_file}" "${dest_rpm}"
@@ -99,6 +103,7 @@ if [ "${#arch_pkgs[@]}" -eq 0 ]; then
   echo "error: no Arch .pkg.tar.zst packages found in ${DIST_DIR}" >&2
   exit 1
 fi
+rm -f "${REPO_DIR}/arch/x86_64/nxctl-"*.pkg.tar.zst*
 cp -f "${arch_pkgs[@]}" "${REPO_DIR}/arch/x86_64/"
 python3 "${SCRIPT_DIR}/build_pacman_db.py" "${REPO_DIR}/arch/x86_64" "angelgnz" "${GPG_KEY_ID}"
 
