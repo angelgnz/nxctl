@@ -6,6 +6,8 @@ mod theme;
 mod tray;
 
 use std::collections::{HashMap, VecDeque};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -123,6 +125,7 @@ struct NxctlApp {
     import_path: String,
     local_active_profile: Option<String>,
     tray: TrayHandle,
+    instance_rx: Receiver<SingleInstanceCmd>,
     window_visible: bool,
     force_quit: bool,
     dashboard_split_ratio: f32,
@@ -135,6 +138,117 @@ struct NxctlApp {
 const PANEL_PWM_ID: &str = "panel:pwm";
 const PANEL_OTHER_ID: &str = "panel:other";
 const DEFAULT_TEMP_CARD_HEIGHT: f32 = 132.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SingleInstanceCmd {
+    Show(Option<View>),
+    Ping,
+}
+
+impl SingleInstanceCmd {
+    fn encode(self) -> &'static str {
+        match self {
+            Self::Show(None) => "SHOW",
+            Self::Show(Some(View::Dashboard)) => "SHOW:dashboard",
+            Self::Show(Some(View::Fans)) => "SHOW:fans",
+            Self::Show(Some(View::Rgb)) => "SHOW:rgb",
+            Self::Show(Some(View::Profiles)) => "SHOW:profiles",
+            Self::Ping => "PING",
+        }
+    }
+
+    fn parse(line: &str) -> Option<Self> {
+        match line.trim() {
+            "SHOW" => Some(Self::Show(None)),
+            "SHOW:dashboard" => Some(Self::Show(Some(View::Dashboard))),
+            "SHOW:fans" => Some(Self::Show(Some(View::Fans))),
+            "SHOW:rgb" => Some(Self::Show(Some(View::Rgb))),
+            "SHOW:profiles" => Some(Self::Show(Some(View::Profiles))),
+            "PING" => Some(Self::Ping),
+            _ => None,
+        }
+    }
+}
+
+enum SingleInstanceGuard {
+    Primary {
+        listener: UnixListener,
+        path: PathBuf,
+    },
+    Secondary,
+}
+
+struct SocketCleanup(PathBuf);
+
+impl Drop for SocketCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn gui_instance_socket_path(daemon_socket: &Path) -> PathBuf {
+    daemon_socket.with_file_name("nxctl-gui.sock")
+}
+
+fn send_single_instance_cmd(mut stream: UnixStream, cmd: SingleInstanceCmd) -> bool {
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    stream
+        .write_all(format!("{}\n", cmd.encode()).as_bytes())
+        .is_ok()
+        && stream.flush().is_ok()
+}
+
+fn acquire_single_instance(
+    path: &Path,
+    cmd: SingleInstanceCmd,
+) -> anyhow::Result<SingleInstanceGuard> {
+    if let Ok(stream) = UnixStream::connect(path)
+        && send_single_instance_cmd(stream, cmd)
+    {
+        return Ok(SingleInstanceGuard::Secondary);
+    }
+
+    let _ = std::fs::remove_file(path);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    match UnixListener::bind(path) {
+        Ok(listener) => Ok(SingleInstanceGuard::Primary {
+            listener,
+            path: path.to_path_buf(),
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+            if let Ok(stream) = UnixStream::connect(path)
+                && send_single_instance_cmd(stream, cmd)
+            {
+                return Ok(SingleInstanceGuard::Secondary);
+            }
+            Err(err.into())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn spawn_single_instance_listener(
+    listener: UnixListener,
+    tx: Sender<SingleInstanceCmd>,
+    ctx: egui::Context,
+) {
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_ok()
+                && let Some(cmd) = SingleInstanceCmd::parse(&line)
+            {
+                if tx.send(cmd).is_err() {
+                    break;
+                }
+                ctx.request_repaint();
+            }
+        }
+    });
+}
 
 fn should_intercept_close_to_tray(close_to_tray: bool, force_quit: bool) -> bool {
     close_to_tray && !force_quit
@@ -367,7 +481,7 @@ fn capture_profile_from_state(
 }
 
 impl NxctlApp {
-    fn new(cc: &eframe::CreationContext<'_>, cli: Cli) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, cli: Cli, instance_listener: UnixListener) -> Self {
         apply_obsidian_theme(&cc.egui_ctx);
         let socket = cli.socket.unwrap_or_else(default_socket_path);
         let backend = Arc::new(CliLiquidctlBackend::new());
@@ -397,6 +511,8 @@ impl NxctlApp {
             );
         }
         let (action_tx, action_rx) = mpsc::channel();
+        let (instance_tx, instance_rx) = mpsc::channel();
+        spawn_single_instance_listener(instance_listener, instance_tx, cc.egui_ctx.clone());
         Self {
             config_path: cli.config,
             config,
@@ -430,6 +546,7 @@ impl NxctlApp {
             import_path: String::new(),
             local_active_profile: None,
             tray: TrayHandle::spawn(cc.egui_ctx.clone(), initial_lang),
+            instance_rx,
             window_visible: !cli.minimized,
             force_quit: false,
             dashboard_split_ratio: 0.50,
@@ -615,6 +732,19 @@ impl NxctlApp {
             }
             refresh = true;
         }
+        while let Ok(cmd) = self.instance_rx.try_recv() {
+            if let SingleInstanceCmd::Show(maybe_view) = cmd {
+                if let Some(view) = maybe_view {
+                    self.view = view;
+                }
+                self.window_visible = true;
+                self.ctx
+                    .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                self.ctx
+                    .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
         while let Ok(ev) = self.tray.rx.try_recv() {
             match ev {
                 TrayEvent::ToggleWindow => {
@@ -622,6 +752,8 @@ impl NxctlApp {
                     self.ctx
                         .send_viewport_cmd(egui::ViewportCommand::Visible(self.window_visible));
                     if self.window_visible {
+                        self.ctx
+                            .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                         self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
                 }
@@ -629,6 +761,8 @@ impl NxctlApp {
                     self.window_visible = true;
                     self.ctx
                         .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    self.ctx
+                        .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 TrayEvent::NextProfile => self.cycle_profile(true),
@@ -2317,6 +2451,23 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let cli = Cli::parse();
+    let daemon_socket = cli.socket.clone().unwrap_or_else(default_socket_path);
+    let gui_socket = gui_instance_socket_path(&daemon_socket);
+    let instance_cmd = if cli.minimized {
+        SingleInstanceCmd::Ping
+    } else {
+        SingleInstanceCmd::Show(cli.view)
+    };
+    let (instance_listener, _socket_cleanup) =
+        match acquire_single_instance(&gui_socket, instance_cmd) {
+            Ok(SingleInstanceGuard::Secondary) => return Ok(()),
+            Ok(SingleInstanceGuard::Primary { listener, path }) => (listener, SocketCleanup(path)),
+            Err(err) => {
+                tracing::warn!(error = %err, "single-instance socket unavailable");
+                return Err(err);
+            }
+        };
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("NXCTL")
         .with_inner_size([1180.0, 760.0])
@@ -2332,7 +2483,7 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "nxctl-gui",
         options,
-        Box::new(move |cc| Ok(Box::new(NxctlApp::new(cc, cli)))),
+        Box::new(move |cc| Ok(Box::new(NxctlApp::new(cc, cli, instance_listener)))),
     )
     .map_err(|e| anyhow!("{e}"))
 }
@@ -3031,5 +3182,51 @@ mod liquid_tests {
         demote_sensor(&mut featured, "gpu");
         sync_dashboard_panels(&featured, &mut order, &mut cols);
         assert!(!order.iter().any(|id| id == "gpu"));
+    }
+
+    #[test]
+    fn single_instance_acquires_primary_forwards_secondary_and_recovers_stale_socket() {
+        let sock_dir = std::env::temp_dir().join(format!(
+            "nxctl_gui_single_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let daemon_sock = sock_dir.join("nxctld.sock");
+        let gui_sock = gui_instance_socket_path(&daemon_sock);
+        assert_eq!(gui_sock, sock_dir.join("nxctl-gui.sock"));
+
+        let primary = acquire_single_instance(&gui_sock, SingleInstanceCmd::Show(None))
+            .expect("initial single instance acquire");
+        let listener = match primary {
+            SingleInstanceGuard::Primary { listener, .. } => listener,
+            SingleInstanceGuard::Secondary => panic!("expected primary instance"),
+        };
+
+        let secondary =
+            acquire_single_instance(&gui_sock, SingleInstanceCmd::Show(Some(View::Fans)))
+                .expect("secondary instance forward");
+        assert!(matches!(secondary, SingleInstanceGuard::Secondary));
+
+        let (stream, _) = listener.accept().expect("accept forwarded command");
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read command line");
+        assert_eq!(
+            SingleInstanceCmd::parse(&line),
+            Some(SingleInstanceCmd::Show(Some(View::Fans)))
+        );
+
+        // Drop listener to simulate a dead process leaving a stale socket file behind.
+        drop(listener);
+        assert!(gui_sock.exists());
+
+        let recovered = acquire_single_instance(&gui_sock, SingleInstanceCmd::Ping)
+            .expect("stale socket recovery");
+        assert!(matches!(recovered, SingleInstanceGuard::Primary { .. }));
+        drop(recovered);
+        let _ = std::fs::remove_dir_all(&sock_dir);
     }
 }

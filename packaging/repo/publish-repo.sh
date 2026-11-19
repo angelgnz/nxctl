@@ -47,7 +47,7 @@ cp -f "${debs[@]}" "${REPO_DIR}/apt/pool/main/n/nxctl/"
   cat > "$APT_CONF" <<'EOF'
 APT::FTPArchive::Release {
   Origin "angelgnz";
-  Label "angelgnz Packages";
+  Label "angelgnz // pkg";
   Suite "stable";
   Codename "stable";
   Architectures "amd64";
@@ -89,7 +89,7 @@ install -m644 "${REPO_DIR}/gpg.key" "${REPO_DIR}/rpm/repodata/repomd.xml.key"
 
 cat > "${REPO_DIR}/rpm/angelgnz-packages.repo" <<'EOF'
 [angelgnz-packages]
-name=angelgnz Packages
+name=angelgnz // pkg
 baseurl=https://angelgnz.github.io/packages/rpm
 enabled=1
 gpgcheck=1
@@ -97,10 +97,15 @@ repo_gpgcheck=1
 gpgkey=https://angelgnz.github.io/packages/gpg.key
 EOF
 
-# 3. Arch Linux Pacman repository
-arch_pkgs=("${DIST_DIR}"/nxctl-*-x86_64.pkg.tar.zst)
+# 3. Arch Linux Pacman repository (skip -debug packages)
+arch_pkgs=()
+for pkg in "${DIST_DIR}"/nxctl-*-x86_64.pkg.tar.zst; do
+  if [[ "$(basename "${pkg}")" != *-debug-* ]]; then
+    arch_pkgs+=("${pkg}")
+  fi
+done
 if [ "${#arch_pkgs[@]}" -eq 0 ]; then
-  echo "error: no Arch .pkg.tar.zst packages found in ${DIST_DIR}" >&2
+  echo "error: no non-debug Arch .pkg.tar.zst packages found in ${DIST_DIR}" >&2
   exit 1
 fi
 rm -f "${REPO_DIR}/arch/x86_64/nxctl-"*.pkg.tar.zst*
