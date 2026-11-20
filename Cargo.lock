@@ -2300,7 +2300,7 @@ dependencies = [
 
 [[package]]
 name = "nxctl"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2313,7 +2313,7 @@ dependencies = [
 
 [[package]]
 name = "nxctl-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "dirs",
  "serde",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "nxctl-gui"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2340,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "nxctld"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",

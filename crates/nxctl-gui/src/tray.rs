@@ -20,21 +20,21 @@ use x11rb::wrapper::ConnectionExt as _;
 const WINDOW_ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray.png");
 
-const DEFAULT_TRAY_BG: (u8, u8, u8) = (0x18, 0x1B, 0x26);
+const DEFAULT_TRAY_BG: (u8, u8, u8) = (0x19, 0x19, 0x1B);
 const SYSTEM_TRAY_REQUEST_DOCK: u32 = 0;
 
 /// Popup context menu dimensions in pixels.
 pub const MENU_WIDTH: u16 = 136;
 pub const MENU_HEIGHT: u16 = 69;
 
-const MENU_BG: (u8, u8, u8) = (0x12, 0x14, 0x1C); // BG_CARD
-const MENU_HOVER_BG: (u8, u8, u8) = (0x18, 0x1B, 0x26); // BG_CONTROL
-const MENU_BORDER: (u8, u8, u8) = (0x2F, 0x37, 0x4A); // BORDER_ACTIVE
-const MENU_DIVIDER: (u8, u8, u8) = (0x23, 0x29, 0x36); // BORDER_MUTED
-const MENU_TEXT: (u8, u8, u8) = (0xCB, 0xD5, 0xE1);
-const MENU_TEXT_HOVER: (u8, u8, u8) = (0xF1, 0xF5, 0xF9); // TEXT_PRIMARY
-const MENU_CYAN: (u8, u8, u8) = (0x00, 0xF0, 0xFF); // CYAN
-const MENU_CRIMSON: (u8, u8, u8) = (0xEF, 0x44, 0x44); // CRIMSON
+const MENU_BG: (u8, u8, u8) = (0x19, 0x19, 0x1B); // BG_CARD
+const MENU_HOVER_BG: (u8, u8, u8) = (0x23, 0x23, 0x25); // BG_CONTROL
+const MENU_BORDER: (u8, u8, u8) = (0x2E, 0x2E, 0x32);
+const MENU_DIVIDER: (u8, u8, u8) = (0x25, 0x25, 0x28);
+const MENU_TEXT: (u8, u8, u8) = (0xA1, 0xA1, 0xA6); // TEXT_SECONDARY
+const MENU_TEXT_HOVER: (u8, u8, u8) = (0xED, 0xED, 0xED); // TEXT_PRIMARY
+const MENU_ACCENT: (u8, u8, u8) = (0x4E, 0xA8, 0xDE); // ACCENT
+const MENU_ERR: (u8, u8, u8) = (0xE5, 0x48, 0x4D); // SEMANTIC_ERR
 
 /// User actions triggered from the system tray icon or its context menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,8 +255,8 @@ pub fn render_menu_bgra_zpixmap(
 
     let (open_label, quit_label) = menu_labels(lang);
     let rows = [
-        (0usize, 1usize, mid_y, open_label, MENU_CYAN),
-        (1usize, mid_y + 1, h - 1, quit_label, MENU_CRIMSON),
+        (0usize, 1usize, mid_y, open_label, MENU_ACCENT),
+        (1usize, mid_y + 1, h - 1, quit_label, MENU_ERR),
     ];
 
     for (idx, row_top, row_bottom, label, accent) in rows {
@@ -847,16 +847,16 @@ mod tests {
             assert_ne!(base, hover1);
             assert_ne!(hover0, hover1);
 
-            // Check cyan indicator bar on row 0 and crimson indicator bar on row 1.
-            let cyan_idx = (17 * usize::from(MENU_WIDTH) + 11) * 4;
+            // Check accent indicator bar on row 0 and error indicator bar on row 1.
+            let accent_idx = (17 * usize::from(MENU_WIDTH) + 11) * 4;
             assert_eq!(
-                &base[cyan_idx..cyan_idx + 4],
-                &[MENU_CYAN.2, MENU_CYAN.1, MENU_CYAN.0, 0xFF]
+                &base[accent_idx..accent_idx + 4],
+                &[MENU_ACCENT.2, MENU_ACCENT.1, MENU_ACCENT.0, 0xFF]
             );
-            let crimson_idx = (51 * usize::from(MENU_WIDTH) + 11) * 4;
+            let err_idx = (51 * usize::from(MENU_WIDTH) + 11) * 4;
             assert_eq!(
-                &base[crimson_idx..crimson_idx + 4],
-                &[MENU_CRIMSON.2, MENU_CRIMSON.1, MENU_CRIMSON.0, 0xFF]
+                &base[err_idx..err_idx + 4],
+                &[MENU_ERR.2, MENU_ERR.1, MENU_ERR.0, 0xFF]
             );
         }
 

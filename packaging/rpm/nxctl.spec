@@ -4,7 +4,7 @@
 %{!?_systemd_util_dir:%define _systemd_util_dir /usr/lib/systemd}
 
 Name:           nxctl
-Version:        0.1.4
+Version:        0.1.5
 Release:        1%{?dist}
 Summary:        Open-source Linux alternative to NZXT CAM over liquidctl (CLI, TUI, daemon, and GUI)
 

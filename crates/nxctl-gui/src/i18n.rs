@@ -7,12 +7,16 @@ use nxctl_core::Language;
 /// Static UI strings for `nxctl-gui`.
 pub struct GuiStrings {
     // Navigation
+    pub nav_section: &'static str,
     pub nav_dashboard: &'static str,
     pub nav_fans: &'static str,
     pub nav_rgb: &'static str,
     pub nav_profiles: &'static str,
 
-    // Sidebar
+    // Sidebar & topbar
+    pub daemon_label: &'static str,
+    pub daemon_online: &'static str,
+    pub daemon_offline: &'static str,
     pub quick_profile_title: &'static str,
     pub language_label: &'static str,
     pub close_to_tray: &'static str,
@@ -22,6 +26,8 @@ pub struct GuiStrings {
     pub aio_liquid: &'static str,
     pub liquid_sub: &'static str,
     pub liquid_label: &'static str,
+    pub cpu_sub: &'static str,
+    pub gpu_sub: &'static str,
     pub demote: &'static str,
     pub pwm_headers: &'static str,
     pub no_nzxt_channels: &'static str,
@@ -68,6 +74,7 @@ pub struct GuiStrings {
     pub save_profile: &'static str,
     pub cancel: &'static str,
     pub active: &'static str,
+    pub default_badge: &'static str,
     pub delete: &'static str,
     pub clone: &'static str,
     pub export: &'static str,
@@ -76,26 +83,32 @@ pub struct GuiStrings {
 
 /// Spanish UI string table.
 pub const ES_STRINGS: GuiStrings = GuiStrings {
+    nav_section: "Navegación",
     nav_dashboard: "Dashboard",
     nav_fans: "Ventiladores",
     nav_rgb: "Iluminación RGB",
     nav_profiles: "Perfiles",
 
-    quick_profile_title: "PERFIL ACTIVO",
-    language_label: "IDIOMA",
+    daemon_label: "Daemon",
+    daemon_online: "Conectado",
+    daemon_offline: "Desconectado",
+    quick_profile_title: "Perfil",
+    language_label: "Idioma",
     close_to_tray: "Segundo plano",
-    dry_run_mode: "MODO DRY-RUN",
+    dry_run_mode: "Modo simulación",
 
-    aio_liquid: "AIO (Líquido)",
-    liquid_sub: "LÍQUIDO",
-    liquid_label: "Líquido",
-    demote: "− Desanclar",
-    pwm_headers: "Headers PWM",
+    aio_liquid: "Refrigerante AIO",
+    liquid_sub: "Circuito",
+    liquid_label: "Circuito",
+    cpu_sub: "Paquete",
+    gpu_sub: "Núcleo",
+    demote: "Desanclar del dashboard",
+    pwm_headers: "Canales PWM",
     no_nzxt_channels: "Sin canales NZXT detectados",
-    other_sensors: "Otros Sensores (RAM / SSD / Sistema)",
+    other_sensors: "Sensores del sistema",
     no_additional_sensors: "Sin sensores adicionales detectados",
-    feature: "+ Anclar",
-    net_tag: "RED",
+    feature: "Anclar al dashboard",
+    net_tag: "Red",
     drag_card_tooltip: "Arrastrar para mover panel",
 
     no_cooling_channels: "Sin canales de ventilación detectados",
@@ -103,63 +116,70 @@ pub const ES_STRINGS: GuiStrings = GuiStrings {
     nodes: "Nodos",
     operating: "Operación",
 
-    enabled: "HABILITADO",
-    disabled: "DESHABILITADO",
+    enabled: "Activo",
+    disabled: "Inactivo",
     pywal_auto_sync: "Sincronizar automáticamente con pywal (daemon)",
-    global_mode: "Modo global:",
-    filter_extremes: "Filtrar muy blancos / negros",
-    saturate_label: "Saturar (vivos):",
-    shift_palette: "Mover paleta:",
+    global_mode: "Modo global",
+    filter_extremes: "Filtrar blancos y negros extremos",
+    saturate_label: "Saturar colores",
+    shift_palette: "Desplazar paleta",
     sync_now: "Sincronizar ahora",
     pywal_not_detected: "pywal no detectado (~/.cache/wal/colors.json)",
     no_nzxt_devices: "Sin dispositivos NZXT detectados",
     sync_whole_device: "sync (todo el dispositivo)",
     apply: "Aplicar",
 
-    new_profile: "+ Nuevo perfil",
+    new_profile: "Nuevo perfil",
     save_config: "Guardar config",
     autogen_config: "Autogenerar TOML",
-    import_toml: "Importar (.toml):",
+    import_toml: "Importar perfil",
     import_hint: "/ruta/al/perfil.toml",
     load: "Cargar",
     profile_editor: "Editor de perfil",
     capture_current_state: "Capturar estado actual",
-    name_label: "Nombre:",
+    name_label: "Nombre",
     profile_name_hint: "mi_perfil",
-    description_label: "Descripción:",
+    description_label: "Descripción",
     optional_hint: "Opcional",
     fixed: "Fijo",
     save_profile: "Guardar perfil",
     cancel: "Cancelar",
-    active: "ACTIVO",
+    active: "Activo",
+    default_badge: "Predeterminado",
     delete: "Eliminar",
     clone: "Clonar",
     export: "Exportar",
-    set_default: "Hacer default",
+    set_default: "Hacer predeterminado",
 };
 
 /// English UI string table.
 pub const EN_STRINGS: GuiStrings = GuiStrings {
+    nav_section: "Navigation",
     nav_dashboard: "Dashboard",
     nav_fans: "Fans",
     nav_rgb: "RGB Lighting",
     nav_profiles: "Profiles",
 
-    quick_profile_title: "ACTIVE PROFILE",
-    language_label: "LANGUAGE",
+    daemon_label: "Daemon",
+    daemon_online: "Connected",
+    daemon_offline: "Offline",
+    quick_profile_title: "Profile",
+    language_label: "Language",
     close_to_tray: "Run in background",
-    dry_run_mode: "DRY-RUN MODE",
+    dry_run_mode: "Dry-run mode",
 
-    aio_liquid: "AIO (Liquid)",
-    liquid_sub: "LIQUID",
-    liquid_label: "Liquid",
-    demote: "− Unpin",
-    pwm_headers: "PWM Headers",
+    aio_liquid: "AIO coolant",
+    liquid_sub: "Loop",
+    liquid_label: "Loop",
+    cpu_sub: "Package",
+    gpu_sub: "Core",
+    demote: "Unpin from dashboard",
+    pwm_headers: "PWM channels",
     no_nzxt_channels: "No NZXT channels detected",
-    other_sensors: "Other Sensors (RAM / SSD / System)",
+    other_sensors: "System sensors",
     no_additional_sensors: "No additional sensors detected",
-    feature: "+ Pin",
-    net_tag: "NET",
+    feature: "Pin to dashboard",
+    net_tag: "Net",
     drag_card_tooltip: "Drag to move panel",
 
     no_cooling_channels: "No cooling channels detected",
@@ -167,35 +187,36 @@ pub const EN_STRINGS: GuiStrings = GuiStrings {
     nodes: "Nodes",
     operating: "Operating",
 
-    enabled: "ENABLED",
-    disabled: "DISABLED",
+    enabled: "Enabled",
+    disabled: "Disabled",
     pywal_auto_sync: "Auto-sync with pywal (daemon)",
-    global_mode: "Global mode:",
-    filter_extremes: "Filter extreme whites / blacks",
-    saturate_label: "Saturate (vivid):",
-    shift_palette: "Shift palette:",
+    global_mode: "Global mode",
+    filter_extremes: "Filter extreme whites and blacks",
+    saturate_label: "Boost saturation",
+    shift_palette: "Shift palette",
     sync_now: "Sync now",
     pywal_not_detected: "pywal not detected (~/.cache/wal/colors.json)",
     no_nzxt_devices: "No NZXT devices detected",
     sync_whole_device: "sync (whole device)",
     apply: "Apply",
 
-    new_profile: "+ New profile",
+    new_profile: "New profile",
     save_config: "Save config",
     autogen_config: "Auto-generate TOML",
-    import_toml: "Import (.toml):",
+    import_toml: "Import profile",
     import_hint: "/path/to/profile.toml",
     load: "Load",
     profile_editor: "Profile editor",
     capture_current_state: "Capture current state",
-    name_label: "Name:",
+    name_label: "Name",
     profile_name_hint: "my_profile",
-    description_label: "Description:",
+    description_label: "Description",
     optional_hint: "Optional",
     fixed: "Fixed",
     save_profile: "Save profile",
     cancel: "Cancel",
-    active: "ACTIVE",
+    active: "Active",
+    default_badge: "Default",
     delete: "Delete",
     clone: "Clone",
     export: "Export",
@@ -211,26 +232,25 @@ pub fn tr(lang: Language) -> &'static GuiStrings {
 }
 
 /// Formats the top-bar telemetry summary line.
-pub fn fmt_top_summary(lang: Language, cpu: &str, gpu: &str, devs: usize) -> String {
-    match lang {
-        Language::Es => format!("CPU {cpu}   GPU {gpu}   NZXT {devs} disp."),
-        Language::En => format!("CPU {cpu}   GPU {gpu}   NZXT {devs} dev."),
-    }
+pub fn fmt_top_summary(_lang: Language, cpu: &str, gpu: &str, devs: usize) -> String {
+    format!("CPU {cpu}  ·  GPU {gpu}  ·  {devs} NZXT")
 }
 
-/// Formats the channel count badge on fan and RGB device cards.
+/// Formats the channel count label on fan and RGB device cards.
 pub fn fmt_channels_badge(lang: Language, count: usize) -> String {
-    match lang {
-        Language::Es => format!("{count} CANALES"),
-        Language::En => format!("{count} CHANNELS"),
+    match (lang, count) {
+        (Language::Es, 1) => "1 canal".to_string(),
+        (Language::Es, n) => format!("{n} canales"),
+        (Language::En, 1) => "1 channel".to_string(),
+        (Language::En, n) => format!("{n} channels"),
     }
 }
 
 /// Formats the current operating point readout below a fan curve plot.
 pub fn fmt_operating_point(lang: Language, temp_c: f32, duty: u8) -> String {
     match lang {
-        Language::Es => format!("Punto operativo: {temp_c:.1}°C → {duty}%"),
-        Language::En => format!("Operating point: {temp_c:.1}°C → {duty}%"),
+        Language::Es => format!("Punto operativo {temp_c:.1}°C — {duty}%"),
+        Language::En => format!("Operating point {temp_c:.1}°C — {duty}%"),
     }
 }
 
@@ -289,16 +309,16 @@ pub fn fmt_profile_applied(
 /// Formats the cooling rules section header in the profile editor.
 pub fn fmt_cooling_rules_header(lang: Language, count: usize) -> String {
     match lang {
-        Language::Es => format!("Reglas de refrigeración ({count}):"),
-        Language::En => format!("Cooling rules ({count}):"),
+        Language::Es => format!("Reglas de refrigeración ({count})"),
+        Language::En => format!("Cooling rules ({count})"),
     }
 }
 
 /// Formats the lighting rules section header in the profile editor.
 pub fn fmt_lighting_rules_header(lang: Language, count: usize) -> String {
     match lang {
-        Language::Es => format!("Reglas de iluminación ({count}):"),
-        Language::En => format!("Lighting rules ({count}):"),
+        Language::Es => format!("Reglas de iluminación ({count})"),
+        Language::En => format!("Lighting rules ({count})"),
     }
 }
 
@@ -441,7 +461,7 @@ pub fn profile_deleted(lang: Language, name: &str) -> String {
 
 pub fn default_profile_set(lang: Language, name: &str) -> String {
     match lang {
-        Language::Es => format!("'{name}' establecido como perfil por defecto"),
+        Language::Es => format!("'{name}' establecido como perfil predeterminado"),
         Language::En => format!("'{name}' set as default profile"),
     }
 }
@@ -478,6 +498,8 @@ mod tests {
         let es = tr(Language::Es);
         let en = tr(Language::En);
 
+        assert_eq!(es.nav_section, "Navegación");
+        assert_eq!(en.nav_section, "Navigation");
         assert_eq!(es.nav_dashboard, "Dashboard");
         assert_eq!(en.nav_dashboard, "Dashboard");
         assert_eq!(es.nav_fans, "Ventiladores");
@@ -487,26 +509,30 @@ mod tests {
         assert_eq!(es.nav_profiles, "Perfiles");
         assert_eq!(en.nav_profiles, "Profiles");
 
-        assert_eq!(es.quick_profile_title, "PERFIL ACTIVO");
-        assert_eq!(en.quick_profile_title, "ACTIVE PROFILE");
-        assert_eq!(es.language_label, "IDIOMA");
-        assert_eq!(en.language_label, "LANGUAGE");
+        assert_eq!(es.daemon_online, "Conectado");
+        assert_eq!(en.daemon_online, "Connected");
+        assert_eq!(es.quick_profile_title, "Perfil");
+        assert_eq!(en.quick_profile_title, "Profile");
+        assert_eq!(es.language_label, "Idioma");
+        assert_eq!(en.language_label, "Language");
         assert_eq!(es.close_to_tray, "Segundo plano");
         assert_eq!(en.close_to_tray, "Run in background");
-        assert_eq!(es.dry_run_mode, "MODO DRY-RUN");
-        assert_eq!(en.dry_run_mode, "DRY-RUN MODE");
-        assert_eq!(es.net_tag, "RED");
-        assert_eq!(en.net_tag, "NET");
-        assert_eq!(es.demote, "− Desanclar");
-        assert_eq!(en.demote, "− Unpin");
-        assert_eq!(es.feature, "+ Anclar");
-        assert_eq!(en.feature, "+ Pin");
-        assert_eq!(es.active, "ACTIVO");
-        assert_eq!(en.active, "ACTIVE");
+        assert_eq!(es.dry_run_mode, "Modo simulación");
+        assert_eq!(en.dry_run_mode, "Dry-run mode");
+        assert_eq!(es.net_tag, "Red");
+        assert_eq!(en.net_tag, "Net");
+        assert_eq!(es.demote, "Desanclar del dashboard");
+        assert_eq!(en.demote, "Unpin from dashboard");
+        assert_eq!(es.feature, "Anclar al dashboard");
+        assert_eq!(en.feature, "Pin to dashboard");
+        assert_eq!(es.active, "Activo");
+        assert_eq!(en.active, "Active");
+        assert_eq!(es.default_badge, "Predeterminado");
+        assert_eq!(en.default_badge, "Default");
         assert_eq!(es.autogen_config, "Autogenerar TOML");
         assert_eq!(en.autogen_config, "Auto-generate TOML");
-        assert_eq!(es.saturate_label, "Saturar (vivos):");
-        assert_eq!(en.saturate_label, "Saturate (vivid):");
+        assert_eq!(es.saturate_label, "Saturar colores");
+        assert_eq!(en.saturate_label, "Boost saturation");
         assert_eq!(es.drag_card_tooltip, "Arrastrar para mover panel");
         assert_eq!(en.drag_card_tooltip, "Drag to move panel");
     }
@@ -514,24 +540,26 @@ mod tests {
     #[test]
     fn dynamic_formatters_render_both_languages() {
         assert_eq!(
-            fmt_top_summary(Language::Es, "45°C", "52°C", 2),
-            "CPU 45°C   GPU 52°C   NZXT 2 disp."
+            fmt_top_summary(Language::Es, "45.0°C", "52.0°C", 2),
+            "CPU 45.0°C  ·  GPU 52.0°C  ·  2 NZXT"
         );
         assert_eq!(
-            fmt_top_summary(Language::En, "45°C", "52°C", 2),
-            "CPU 45°C   GPU 52°C   NZXT 2 dev."
+            fmt_top_summary(Language::En, "45.0°C", "52.0°C", 2),
+            "CPU 45.0°C  ·  GPU 52.0°C  ·  2 NZXT"
         );
 
-        assert_eq!(fmt_channels_badge(Language::Es, 4), "4 CANALES");
-        assert_eq!(fmt_channels_badge(Language::En, 4), "4 CHANNELS");
+        assert_eq!(fmt_channels_badge(Language::Es, 1), "1 canal");
+        assert_eq!(fmt_channels_badge(Language::Es, 4), "4 canales");
+        assert_eq!(fmt_channels_badge(Language::En, 1), "1 channel");
+        assert_eq!(fmt_channels_badge(Language::En, 4), "4 channels");
 
         assert_eq!(
             fmt_operating_point(Language::Es, 34.5, 60),
-            "Punto operativo: 34.5°C → 60%"
+            "Punto operativo 34.5°C — 60%"
         );
         assert_eq!(
             fmt_operating_point(Language::En, 34.5, 60),
-            "Operating point: 34.5°C → 60%"
+            "Operating point 34.5°C — 60%"
         );
 
         assert_eq!(fmt_wallpaper(Language::Es, "bg.png"), "Fondo: bg.png");
@@ -575,20 +603,20 @@ mod tests {
 
         assert_eq!(
             fmt_cooling_rules_header(Language::Es, 2),
-            "Reglas de refrigeración (2):"
+            "Reglas de refrigeración (2)"
         );
         assert_eq!(
             fmt_cooling_rules_header(Language::En, 2),
-            "Cooling rules (2):"
+            "Cooling rules (2)"
         );
 
         assert_eq!(
             fmt_lighting_rules_header(Language::Es, 3),
-            "Reglas de iluminación (3):"
+            "Reglas de iluminación (3)"
         );
         assert_eq!(
             fmt_lighting_rules_header(Language::En, 3),
-            "Lighting rules (3):"
+            "Lighting rules (3)"
         );
 
         assert_eq!(
@@ -670,7 +698,7 @@ mod tests {
         assert_eq!(profile_deleted(Language::En, "p1"), "Profile 'p1' deleted");
         assert_eq!(
             default_profile_set(Language::Es, "p1"),
-            "'p1' establecido como perfil por defecto"
+            "'p1' establecido como perfil predeterminado"
         );
         assert_eq!(
             default_profile_set(Language::En, "p1"),

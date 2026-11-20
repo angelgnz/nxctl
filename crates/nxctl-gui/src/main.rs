@@ -1,4 +1,4 @@
-//! `nxctl-gui`: native desktop dashboard with the "Obsidian Telemetry" look.
+//! `nxctl-gui`: native desktop dashboard with the Graphite Instrument design system.
 
 mod i18n;
 mod poller;
@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use clap::Parser;
-use eframe::egui::{self, Color32, RichText};
-use egui_plot::{HLine, Line, Plot, PlotPoints, Points, VLine};
+use eframe::egui::{self, Color32, RichText, emath::easing};
+use egui_plot::{GridInput, GridMark, HLine, HoverPosition, Line, Plot, PlotPoints, Points, VLine};
 use nxctl_core::liquidctl::{CliLiquidctlBackend, LiquidctlBackend};
 use nxctl_core::{
     Config, CoolingRule, CoolingTarget, FanCurve, IpcRequest, IpcResponse, Language, LightingRule,
@@ -94,7 +94,7 @@ impl Default for ChannelRgbState {
     fn default() -> Self {
         Self {
             mode: 0,
-            color: CYAN,
+            color: ACCENT,
         }
     }
 }
@@ -137,7 +137,8 @@ struct NxctlApp {
 
 const PANEL_PWM_ID: &str = "panel:pwm";
 const PANEL_OTHER_ID: &str = "panel:other";
-const DEFAULT_TEMP_CARD_HEIGHT: f32 = 132.0;
+const DEFAULT_TEMP_CARD_HEIGHT: f32 = 128.0;
+const DEFAULT_SPLIT_RATIO: f32 = 0.54;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SingleInstanceCmd {
@@ -482,7 +483,7 @@ fn capture_profile_from_state(
 
 impl NxctlApp {
     fn new(cc: &eframe::CreationContext<'_>, cli: Cli, instance_listener: UnixListener) -> Self {
-        apply_obsidian_theme(&cc.egui_ctx);
+        apply_theme(&cc.egui_ctx);
         let socket = cli.socket.unwrap_or_else(default_socket_path);
         let backend = Arc::new(CliLiquidctlBackend::new());
         let mut config_err = None;
@@ -549,7 +550,7 @@ impl NxctlApp {
             instance_rx,
             window_visible: !cli.minimized,
             force_quit: false,
-            dashboard_split_ratio: 0.50,
+            dashboard_split_ratio: DEFAULT_SPLIT_RATIO,
             dashboard_card_heights: HashMap::new(),
             dashboard_panel_col: default_dashboard_panel_cols(),
             dashboard_panel_order: default_dashboard_panel_order(),
@@ -784,75 +785,72 @@ impl NxctlApp {
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let lang = self.config.language;
         let t = i18n::tr(lang);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            draw_brand_mark(ui, 20.0);
+            ui.label(
+                RichText::new("nxctl")
+                    .font(font_medium(16.0))
+                    .color(TEXT_PRIMARY),
+            );
+        });
+        ui.add_space(24.0);
+        ui.label(RichText::new(t.nav_section).color(TEXT_MUTED).size(12.0));
         ui.add_space(8.0);
-        ui.label(RichText::new("NXCTL").color(CYAN).strong().size(15.0));
-        ui.add_space(14.0);
+
         for v in View::ALL {
             let selected = self.view == v;
-            let text = RichText::new(v.label(lang)).size(14.0).color(if selected {
-                CYAN
-            } else {
-                TEXT_SECONDARY
-            });
-            let btn = egui::Button::new(text)
-                .fill(if selected {
-                    BG_CONTROL
-                } else {
-                    Color32::TRANSPARENT
-                })
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    if selected {
-                        BORDER_ACTIVE
-                    } else {
-                        Color32::TRANSPARENT
-                    },
-                ))
-                .min_size(egui::vec2(ui.available_width(), 32.0));
-            if ui.add(btn).clicked() {
+            if sidebar_nav_row(ui, v, selected, v.label(lang)) {
                 self.view = v;
             }
+            ui.add_space(4.0);
         }
+
         let mut selected_lang: Option<Language> = None;
         let mut toggled_close_to_tray: Option<bool> = None;
-        let (daemon_txt, daemon_col) = if self.daemon_online() {
-            ("SYS OK", EMERALD)
+        let (daemon_txt, daemon_dot, daemon_txt_col) = if self.daemon_online() {
+            (t.daemon_online, SEMANTIC_OK, TEXT_SECONDARY)
         } else {
-            ("OFFLINE", CRIMSON)
+            (t.daemon_offline, SEMANTIC_ERR, SEMANTIC_ERR)
         };
 
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.add_space(8.0);
+        let footer_id = egui::Id::unique("sidebar_footer_height");
+        let last_footer_h = ui
+            .ctx()
+            .data(|d| d.get_temp::<f32>(footer_id))
+            .unwrap_or(176.0);
+        let push_down = (ui.available_height() - last_footer_h).max(16.0);
+        ui.add_space(push_down);
+
+        let footer_resp = ui.vertical(|ui| {
             if self.dry_run {
-                small_muted(ui, t.dry_run_mode);
-                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(t.dry_run_mode)
+                        .monospace()
+                        .size(12.0)
+                        .color(TEXT_MUTED),
+                );
+                ui.add_space(8.0);
             }
             egui::Frame::new()
                 .fill(BG_CARD)
                 .stroke(egui::Stroke::new(1.0, BORDER_MUTED))
-                .corner_radius(egui::CornerRadius::same(4))
-                .inner_margin(egui::Margin::same(8))
+                .corner_radius(RADIUS_CARD)
+                .inner_margin(egui::Margin::same(12))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        draw_shield_icon(ui, 13.0, daemon_col);
-                        ui.label(
-                            RichText::new("DAEMON")
-                                .color(TEXT_SECONDARY)
-                                .size(11.0)
-                                .strong(),
-                        );
+                        status_dot_label(ui, daemon_dot, t.daemon_label, TEXT_PRIMARY);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            badge(ui, daemon_txt, daemon_col);
+                            ui.label(RichText::new(daemon_txt).size(12.0).color(daemon_txt_col));
                         });
                     });
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(t.language_label)
-                            .color(TEXT_SECONDARY)
-                            .size(11.0)
-                            .strong(),
-                    );
+                    ui.add_space(12.0);
+                    hairline_divider(ui);
+                    ui.add_space(12.0);
+
+                    ui.label(RichText::new(t.language_label).color(TEXT_MUTED).size(12.0));
                     ui.add_space(4.0);
                     let mut current_lang = lang;
                     egui::ComboBox::from_id_salt("sidebar_language")
@@ -873,29 +871,39 @@ impl NxctlApp {
                                 }
                             }
                         });
-                    ui.add_space(6.0);
+
+                    ui.add_space(10.0);
                     let mut close_to_tray = self.config.close_to_tray;
                     if ui
                         .checkbox(
                             &mut close_to_tray,
                             RichText::new(t.close_to_tray)
                                 .color(TEXT_SECONDARY)
-                                .size(11.5),
+                                .size(13.0),
                         )
                         .changed()
                     {
                         toggled_close_to_tray = Some(close_to_tray);
                     }
+
                     if !self.status_msg.is_empty() {
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new(&self.status_msg)
-                                .size(11.0)
-                                .color(if self.status_ok { EMERALD } else { AMBER }),
-                        );
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(&self.status_msg).size(12.0).color(
+                            if self.status_ok {
+                                TEXT_MUTED
+                            } else {
+                                SEMANTIC_WARN
+                            },
+                        ));
                     }
                 });
         });
+
+        let measured_h = footer_resp.response.rect.height();
+        if (measured_h - last_footer_h).abs() > 0.5 {
+            ui.ctx().data_mut(|d| d.insert_temp(footer_id, measured_h));
+            ui.ctx().request_repaint();
+        }
 
         if let Some(new_lang) = selected_lang {
             self.config.language = new_lang;
@@ -915,23 +923,31 @@ impl NxctlApp {
         let profile_names: Vec<String> = self.config.profiles.keys().cloned().collect();
         let mut selected_to_apply: Option<String> = None;
         ui.horizontal_centered(|ui| {
-            ui.add_space(12.0);
-            let fmt = |v: Option<f32>| v.map_or("--".to_string(), |t| format!("{t:.0}°C"));
+            ui.label(
+                RichText::new(self.view.label(lang))
+                    .font(font_medium(16.0))
+                    .color(TEXT_PRIMARY),
+            );
+            ui.add_space(20.0);
             ui.label(
                 RichText::new(i18n::fmt_top_summary(
                     lang,
-                    &fmt(self.snap.cpu_c),
-                    &fmt(self.snap.gpu_c),
+                    &format_temp(self.snap.cpu_c),
+                    &format_temp(self.snap.gpu_c),
                     self.snap.devices.len(),
                 ))
-                .color(TEXT_SECONDARY)
-                .monospace(),
+                .color(TEXT_MUTED)
+                .monospace()
+                .size(12.5),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(12.0);
                 let mut current = active.clone();
                 egui::ComboBox::from_id_salt("topbar_quick_profile")
-                    .selected_text(RichText::new(&current).color(CYAN).strong())
+                    .selected_text(
+                        RichText::new(&current)
+                            .font(font_medium(13.0))
+                            .color(TEXT_PRIMARY),
+                    )
                     .show_ui(ui, |ui| {
                         for name in &profile_names {
                             if ui
@@ -942,11 +958,11 @@ impl NxctlApp {
                             }
                         }
                     });
+                ui.add_space(8.0);
                 ui.label(
-                    RichText::new(format!("{}:", t.quick_profile_title))
-                        .color(TEXT_SECONDARY)
-                        .size(11.0)
-                        .strong(),
+                    RichText::new(t.quick_profile_title)
+                        .color(TEXT_MUTED)
+                        .size(12.0),
                 );
             });
         });
@@ -982,7 +998,7 @@ impl NxctlApp {
 
         let total_w = ui.available_width();
         let avail = (total_w - 16.0).max(200.0);
-        let ratio = self.dashboard_split_ratio.clamp(0.25, 0.75);
+        let ratio = self.dashboard_split_ratio.clamp(0.28, 0.72);
         let left_w = (avail * ratio).floor();
         let right_w = (avail - left_w).max(100.0);
         let splitter_h = ui.available_height().max(320.0);
@@ -999,7 +1015,7 @@ impl NxctlApp {
         let featured = &self.featured_sensors;
 
         ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = 0.0;
 
             let left_resp = ui.allocate_ui_with_layout(
                 egui::vec2(left_w, 0.0),
@@ -1032,10 +1048,10 @@ impl NxctlApp {
             splitter_x = split_resp.rect.center().x;
             if split_resp.dragged() {
                 self.dashboard_split_ratio =
-                    ((left_w + split_resp.drag_delta().x) / avail).clamp(0.25, 0.75);
+                    ((left_w + split_resp.drag_delta().x) / avail).clamp(0.28, 0.72);
             }
             if split_resp.double_clicked() {
-                self.dashboard_split_ratio = 0.50;
+                self.dashboard_split_ratio = DEFAULT_SPLIT_RATIO;
             }
 
             let right_resp = ui.allocate_ui_with_layout(
@@ -1089,8 +1105,8 @@ impl NxctlApp {
             if let Some((_, _, target_rect)) = hit {
                 ui.painter().rect_stroke(
                     target_rect,
-                    egui::CornerRadius::same(6),
-                    egui::Stroke::new(1.5, CYAN.gamma_multiply(0.8)),
+                    RADIUS_CARD,
+                    egui::Stroke::new(1.5, ACCENT.gamma_multiply(0.75)),
                     egui::StrokeKind::Inside,
                 );
             } else if col_rects[target_col] != egui::Rect::NOTHING {
@@ -1106,8 +1122,8 @@ impl NxctlApp {
                 );
                 ui.painter().rect_stroke(
                     drop_rect,
-                    egui::CornerRadius::same(6),
-                    egui::Stroke::new(1.2, CYAN.gamma_multiply(0.55)),
+                    RADIUS_CARD,
+                    egui::Stroke::new(1.2, ACCENT.gamma_multiply(0.45)),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -1153,7 +1169,7 @@ impl NxctlApp {
             for (dev, channels) in groups {
                 let all_pumps =
                     !channels.is_empty() && channels.iter().all(|c| is_pump_channel(&c.channel));
-                let header_accent = if all_pumps { MAGENTA } else { CYAN };
+                let series_color = if all_pumps { SERIES_AIO } else { ACCENT };
 
                 let selected_name = {
                     let entry = self
@@ -1172,9 +1188,9 @@ impl NxctlApp {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         if all_pumps {
-                            draw_pump_icon(ui, 18.0, header_accent);
+                            draw_pump_icon(ui, 16.0, TEXT_MUTED);
                         } else {
-                            draw_fan_icon(ui, 18.0, header_accent);
+                            draw_fan_icon(ui, 16.0, TEXT_MUTED);
                         }
                         card_title(ui, &dev);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1193,13 +1209,16 @@ impl NxctlApp {
                                         }
                                     }
                                 });
-                            badge(
-                                ui,
-                                &i18n::fmt_channels_badge(lang, channels.len()),
-                                header_accent,
+                            ui.add_space(12.0);
+                            ui.label(
+                                RichText::new(i18n::fmt_channels_badge(lang, channels.len()))
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(TEXT_MUTED),
                             );
                         });
                     });
+                    ui.add_space(12.0);
 
                     let curve: Option<&FanCurve> = self
                         .config
@@ -1222,27 +1241,49 @@ impl NxctlApp {
                             snap.liquid_c.or(snap.cpu_c)
                         };
                         Plot::new(("curve_plot", &dev))
-                            .height(155.0)
+                            .height(180.0)
                             .allow_drag(false)
                             .allow_zoom(false)
                             .allow_scroll(false)
+                            .show_background(true)
+                            .grid_color(PLOT_GRID)
+                            .grid_fade(0.85)
+                            .show_axes([true, true])
+                            .show_grid([true, true])
+                            .y_axis_min_width(44.0)
+                            .x_grid_spacer(fixed_fan_temp_grid)
+                            .x_axis_formatter(|mark, _| format!("{:.0}°C", mark.value))
+                            .y_axis_formatter(|mark, _| format!("{:.0}%", mark.value))
+                            .y_grid_spacer(fixed_percent_grid)
+                            .label_formatter(curve_plot_hover_label)
+                            .set_margin_fraction(egui::vec2(0.03, 0.08))
                             .include_y(0.0)
                             .include_y(100.0)
                             .show(ui, |p| {
                                 p.line(
                                     Line::new(t.curve, PlotPoints::from(pts.clone()))
-                                        .color(header_accent)
-                                        .width(2.0),
+                                        .color(series_color)
+                                        .width(2.0)
+                                        .fill(0.0)
+                                        .fill_alpha(0.08),
                                 );
                                 p.points(
                                     Points::new(t.nodes, PlotPoints::from(pts))
-                                        .color(header_accent)
-                                        .radius(3.0),
+                                        .color(series_color)
+                                        .radius(3.5),
                                 );
                                 if let Some(temp) = live {
                                     let duty = evaluate_curve(curve, temp);
-                                    p.vline(VLine::new("Temp", f64::from(temp)).color(TEXT_MUTED));
-                                    p.hline(HLine::new("Duty", f64::from(duty)).color(TEXT_MUTED));
+                                    p.vline(
+                                        VLine::new("Temp", f64::from(temp))
+                                            .color(BORDER_ACTIVE)
+                                            .highlight(false),
+                                    );
+                                    p.hline(
+                                        HLine::new("Duty", f64::from(duty))
+                                            .color(BORDER_ACTIVE)
+                                            .highlight(false),
+                                    );
                                     p.points(
                                         Points::new(
                                             t.operating,
@@ -1251,23 +1292,29 @@ impl NxctlApp {
                                                 f64::from(duty),
                                             ]]),
                                         )
-                                        .color(AMBER)
-                                        .radius(6.0),
+                                        .color(SEMANTIC_WARN)
+                                        .radius(5.0),
                                     );
                                 }
                             });
                         if let Some(temp) = live {
-                            small_muted(
-                                ui,
-                                &i18n::fmt_operating_point(lang, temp, evaluate_curve(curve, temp)),
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(i18n::fmt_operating_point(
+                                    lang,
+                                    temp,
+                                    evaluate_curve(curve, temp),
+                                ))
+                                .monospace()
+                                .size(12.0)
+                                .color(TEXT_SECONDARY),
                             );
                         }
                     }
 
-                    ui.add_space(6.0);
+                    ui.add_space(12.0);
                     for c in &channels {
                         let is_pump = is_pump_channel(&c.channel);
-                        let accent = if is_pump { MAGENTA } else { CYAN };
                         let key = (c.device.clone(), c.channel.clone());
                         let entry = self
                             .manual_duty
@@ -1275,44 +1322,45 @@ impl NxctlApp {
                             .or_insert_with(|| c.duty.unwrap_or(0.0));
 
                         let mut set_duty: Option<u8> = None;
-                        egui::Frame::new()
-                            .fill(BG_SIDEBAR)
-                            .corner_radius(egui::CornerRadius::same(4))
-                            .stroke(egui::Stroke::new(1.0, BORDER_MUTED))
-                            .inner_margin(egui::Margin::symmetric(10, 6))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    if is_pump {
-                                        draw_pump_icon(ui, 15.0, accent);
-                                    } else {
-                                        draw_fan_icon(ui, 15.0, accent);
-                                    }
-                                    ui.label(
+                        row_frame(false).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if is_pump {
+                                    draw_pump_icon(ui, 16.0, TEXT_MUTED);
+                                } else {
+                                    draw_fan_icon(ui, 16.0, TEXT_MUTED);
+                                }
+                                ui.add_sized(
+                                    egui::vec2(120.0, 20.0),
+                                    egui::Label::new(
                                         RichText::new(&c.label).color(TEXT_PRIMARY).size(13.0),
-                                    );
-                                    if let Some(rpm) = c.rpm {
+                                    )
+                                    .truncate(),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let resp = ui.add(
+                                            egui::Slider::new(entry, 0.0..=100.0)
+                                                .step_by(1.0)
+                                                .max_decimals(0)
+                                                .suffix("%"),
+                                        );
+                                        if resp.drag_stopped()
+                                            || (resp.changed() && !resp.dragged())
+                                        {
+                                            set_duty = Some(*entry as u8);
+                                        }
+                                        ui.add_space(12.0);
                                         ui.label(
-                                            RichText::new(format!("{rpm:.0} RPM"))
-                                                .color(TEXT_SECONDARY)
+                                            RichText::new(format_rpm(c.rpm))
+                                                .color(TEXT_MUTED)
                                                 .monospace()
                                                 .size(12.0),
                                         );
-                                    }
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            let resp = ui.add(
-                                                egui::Slider::new(entry, 0.0..=100.0).suffix("%"),
-                                            );
-                                            if resp.drag_stopped()
-                                                || (resp.changed() && !resp.dragged())
-                                            {
-                                                set_duty = Some(*entry as u8);
-                                            }
-                                        },
-                                    );
-                                });
+                                    },
+                                );
                             });
+                        });
                         if let Some(duty) = set_duty {
                             let backend = self.backend.clone();
                             let (dev_name, ch_name, dry) =
@@ -1322,10 +1370,10 @@ impl NxctlApp {
                                 Ok(format!("{dev_name}/{ch_name} → {duty}%"))
                             });
                         }
-                        ui.add_space(4.0);
+                        ui.add_space(8.0);
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(16.0);
             }
         });
     }
@@ -1400,16 +1448,17 @@ impl NxctlApp {
             card_frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    draw_palette_icon(ui, 15.0, MAGENTA);
+                    draw_palette_icon(ui, 16.0, TEXT_MUTED);
                     card_title(ui, "Pywal Sync");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.config.pywal.enabled {
-                            badge(ui, t.enabled, EMERALD);
+                            status_dot_label(ui, SEMANTIC_OK, t.enabled, TEXT_SECONDARY);
                         } else {
-                            badge(ui, t.disabled, TEXT_MUTED);
+                            status_dot_label(ui, TEXT_MUTED, t.disabled, TEXT_MUTED);
                         }
                     });
                 });
+                ui.add_space(12.0);
 
                 let mut pywal_enabled = self.config.pywal.enabled;
                 let mut pywal_mode = if self.config.pywal.mode.trim().is_empty() {
@@ -1436,11 +1485,8 @@ impl NxctlApp {
                                     }
                                 }
                             });
-                        ui.label(
-                            RichText::new(t.global_mode)
-                                .size(12.0)
-                                .color(TEXT_SECONDARY),
-                        );
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(t.global_mode).size(12.0).color(TEXT_MUTED));
                     });
                 });
                 if mode_changed {
@@ -1452,7 +1498,7 @@ impl NxctlApp {
                     Ok(palette) => {
                         let mut filter_extremes = self.config.pywal.filter_extremes;
                         let mut palette_changed = false;
-                        ui.add_space(4.0);
+                        ui.add_space(8.0);
                         ui.horizontal_wrapped(|ui| {
                             if ui
                                 .checkbox(&mut filter_extremes, t.filter_extremes)
@@ -1473,6 +1519,7 @@ impl NxctlApp {
                                 .add(
                                     egui::Slider::new(&mut sat_pct, 0.0..=100.0)
                                         .suffix("%")
+                                        .max_decimals(0)
                                         .step_by(5.0),
                                 )
                                 .changed()
@@ -1490,7 +1537,10 @@ impl NxctlApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.small_button("+").clicked() {
+                                    if ui
+                                        .add(secondary_button("+").min_size(egui::vec2(28.0, 28.0)))
+                                        .clicked()
+                                    {
                                         self.config.pywal.palette_offset =
                                             (self.config.pywal.palette_offset + 1) % len;
                                         palette_changed = true;
@@ -1501,20 +1551,21 @@ impl NxctlApp {
                                             self.config.pywal.palette_offset % len
                                         ))
                                         .monospace()
-                                        .size(11.0)
-                                        .color(CYAN),
+                                        .size(12.0)
+                                        .color(TEXT_PRIMARY),
                                     );
-                                    if ui.small_button("-").clicked() {
+                                    if ui
+                                        .add(secondary_button("-").min_size(egui::vec2(28.0, 28.0)))
+                                        .clicked()
+                                    {
                                         self.config.pywal.palette_offset =
                                             (self.config.pywal.palette_offset + len - 1) % len;
                                         palette_changed = true;
                                     }
+                                    ui.add_space(4.0);
                                     ui.label(
-                                        RichText::new(t.shift_palette)
-                                            .size(11.0)
-                                            .color(TEXT_SECONDARY),
+                                        RichText::new(t.shift_palette).size(12.0).color(TEXT_MUTED),
                                     );
-                                    draw_palette_icon(ui, 13.0, CYAN);
                                 },
                             );
                         });
@@ -1529,7 +1580,9 @@ impl NxctlApp {
                             self.config.pywal.saturate,
                         );
 
-                        ui.add_space(6.0);
+                        ui.add_space(12.0);
+                        hairline_divider(ui);
+                        ui.add_space(12.0);
                         ui.horizontal_wrapped(|ui| {
                             if let Some(ref wp) = palette.wallpaper {
                                 let wp_name = Path::new(wp)
@@ -1538,14 +1591,15 @@ impl NxctlApp {
                                     .unwrap_or(wp);
                                 ui.label(
                                     RichText::new(i18n::fmt_wallpaper(lang, wp_name))
-                                        .size(11.0)
-                                        .color(TEXT_SECONDARY),
+                                        .monospace()
+                                        .size(12.0)
+                                        .color(TEXT_MUTED),
                                 );
                             }
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.button(t.sync_now).clicked() {
+                                    if ui.add(primary_button(t.sync_now)).clicked() {
                                         let primary_rgb =
                                             select_primary_pywal_rgb(&palette, &self.config.pywal);
                                         if let Some([r, g, b]) = primary_rgb {
@@ -1567,27 +1621,28 @@ impl NxctlApp {
                             );
                         });
 
-                        ui.add_space(6.0);
+                        ui.add_space(12.0);
                         ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                             for (key, hex_str, [r, g, b]) in &entries {
                                 let color32 = Color32::from_rgb(*r, *g, *b);
                                 let (rect, resp) = ui.allocate_exact_size(
-                                    egui::vec2(22.0, 22.0),
+                                    egui::vec2(28.0, 28.0),
                                     egui::Sense::click(),
                                 );
-                                ui.painter().rect_filled(
+                                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                                ui.painter().rect_filled(rect, RADIUS_CHIP, color32);
+                                let stroke = if resp.hovered() {
+                                    egui::Stroke::new(1.5, TEXT_PRIMARY)
+                                } else {
+                                    egui::Stroke::new(1.0, BORDER_MUTED)
+                                };
+                                ui.painter().rect_stroke(
                                     rect,
-                                    egui::CornerRadius::same(3),
-                                    color32,
+                                    RADIUS_CHIP,
+                                    stroke,
+                                    egui::StrokeKind::Inside,
                                 );
-                                if resp.hovered() {
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        egui::CornerRadius::same(3),
-                                        egui::Stroke::new(1.5, Color32::WHITE),
-                                        egui::StrokeKind::Inside,
-                                    );
-                                }
                                 let resp = resp.on_hover_text(format!("{key}: #{hex_str}"));
                                 if resp.clicked() {
                                     self.sync_rgb_rows(&snap, &devices, color32, &pywal_mode);
@@ -1613,13 +1668,13 @@ impl NxctlApp {
                         });
                     }
                     Err(_) => {
-                        ui.add_space(4.0);
+                        ui.add_space(8.0);
                         small_muted(ui, t.pywal_not_detected);
                     }
                 }
             });
 
-            ui.add_space(8.0);
+            ui.add_space(16.0);
 
             if devices.is_empty() {
                 card_frame().show(ui, |ui| {
@@ -1640,15 +1695,21 @@ impl NxctlApp {
                             || dev.to_ascii_lowercase().contains("corsair")
                             || dev.to_ascii_lowercase().contains("aio");
                         if is_aio {
-                            draw_pump_icon(ui, 15.0, CYAN);
+                            draw_pump_icon(ui, 16.0, TEXT_MUTED);
                         } else {
-                            draw_led_icon(ui, 15.0, MAGENTA);
+                            draw_led_icon(ui, 16.0, TEXT_MUTED);
                         }
                         card_title(ui, dev);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            badge(ui, &i18n::fmt_channels_badge(lang, channels.len()), MAGENTA);
+                            ui.label(
+                                RichText::new(i18n::fmt_channels_badge(lang, channels.len()))
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(TEXT_MUTED),
+                            );
                         });
                     });
+                    ui.add_space(12.0);
 
                     for ch in &channels {
                         let state = self
@@ -1657,82 +1718,77 @@ impl NxctlApp {
                             .or_default();
                         state.mode = state.mode.min(modes.len().saturating_sub(1));
                         let is_sync = ch == "sync";
+                        let is_off = modes.get(state.mode).is_some_and(|m| m == "off");
+                        let icon_col = if is_off { TEXT_MUTED } else { state.color };
 
-                        egui::Frame::new()
-                            .fill(if is_sync { BG_CONTROL } else { BG_SIDEBAR })
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                if is_sync { BORDER_ACTIVE } else { BORDER_MUTED },
-                            ))
-                            .corner_radius(egui::CornerRadius::same(4))
-                            .inner_margin(egui::Margin::symmetric(10, 6))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    let ch_lower = ch.to_ascii_lowercase();
-                                    if is_sync {
-                                        draw_sync_icon(ui, 14.0, state.color);
-                                    } else if ch_lower.contains("ring") {
-                                        draw_ring_icon(ui, 14.0, state.color);
-                                    } else {
-                                        draw_led_icon(ui, 14.0, state.color);
-                                    }
-                                    let label = if is_sync {
-                                        t.sync_whole_device.to_string()
-                                    } else {
-                                        ch.clone()
-                                    };
-                                    ui.label(
-                                        RichText::new(label)
-                                            .monospace()
-                                            .strong()
-                                            .color(if is_sync { MAGENTA } else { TEXT_PRIMARY }),
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if ui.button(t.apply).clicked() {
-                                                let c = state.color;
-                                                let hex = format!(
-                                                    "{:02x}{:02x}{:02x}",
-                                                    c.r(),
-                                                    c.g(),
-                                                    c.b()
-                                                );
-                                                let mode = &modes[state.mode];
-                                                let colors =
-                                                    if mode == "spectrum-wave" || mode == "off" {
-                                                        vec![]
-                                                    } else {
-                                                        vec![hex]
-                                                    };
-                                                pending = Some((
-                                                    dev.clone(),
-                                                    ch.clone(),
-                                                    mode.clone(),
-                                                    colors,
-                                                ));
-                                            }
-                                            egui::color_picker::color_edit_button_srgba(
-                                                ui,
-                                                &mut state.color,
-                                                egui::color_picker::Alpha::Opaque,
-                                            );
-                                            egui::ComboBox::from_id_salt(("rgb_mode", dev, ch))
-                                                .selected_text(&modes[state.mode])
-                                                .show_ui(ui, |ui| {
-                                                    for (i, m) in modes.iter().enumerate() {
-                                                        ui.selectable_value(&mut state.mode, i, m);
-                                                    }
-                                                });
-                                        },
-                                    );
-                                });
+                        row_frame(is_sync).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let ch_lower = ch.to_ascii_lowercase();
+                                if is_sync {
+                                    draw_sync_icon(ui, 16.0, icon_col);
+                                } else if ch_lower.contains("ring") {
+                                    draw_ring_icon(ui, 16.0, icon_col);
+                                } else {
+                                    draw_led_icon(ui, 16.0, icon_col);
+                                }
+                                let label = if is_sync {
+                                    t.sync_whole_device.to_string()
+                                } else {
+                                    ch.clone()
+                                };
+                                let label_text = if is_sync {
+                                    RichText::new(label)
+                                        .font(font_medium(13.0))
+                                        .color(TEXT_PRIMARY)
+                                } else {
+                                    RichText::new(label)
+                                        .monospace()
+                                        .size(13.0)
+                                        .color(TEXT_PRIMARY)
+                                };
+                                ui.label(label_text);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.add(secondary_button(t.apply)).clicked() {
+                                            let c = state.color;
+                                            let hex =
+                                                format!("{:02x}{:02x}{:02x}", c.r(), c.g(), c.b());
+                                            let mode = &modes[state.mode];
+                                            let colors = if mode == "spectrum-wave" || mode == "off"
+                                            {
+                                                vec![]
+                                            } else {
+                                                vec![hex]
+                                            };
+                                            pending = Some((
+                                                dev.clone(),
+                                                ch.clone(),
+                                                mode.clone(),
+                                                colors,
+                                            ));
+                                        }
+                                        egui::color_picker::color_edit_button_srgba(
+                                            ui,
+                                            &mut state.color,
+                                            egui::color_picker::Alpha::Opaque,
+                                        );
+                                        egui::ComboBox::from_id_salt(("rgb_mode", dev, ch))
+                                            .selected_text(&modes[state.mode])
+                                            .show_ui(ui, |ui| {
+                                                for (i, m) in modes.iter().enumerate() {
+                                                    ui.selectable_value(&mut state.mode, i, m);
+                                                }
+                                            });
+                                    },
+                                );
                             });
-                        ui.add_space(4.0);
+                        });
+                        ui.add_space(8.0);
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(16.0);
             }
         });
 
@@ -1755,52 +1811,58 @@ impl NxctlApp {
         let curve_names: Vec<String> = self.config.curves.keys().cloned().collect();
 
         // Top action card
-        card_frame().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                if ui.button(t.new_profile).clicked() {
-                    self.show_new_profile = !self.show_new_profile;
-                    if self.show_new_profile {
-                        self.new_profile_name.clear();
-                        self.new_profile_desc.clear();
-                        self.draft_profile = self.capture_current_profile();
-                    }
-                }
-                if ui.button(t.save_config).clicked() {
-                    self.save_and_reload_config(i18n::config_saved(lang));
-                }
-                if ui.button(t.autogen_config).clicked() {
-                    self.autogenerate_config();
-                }
-                ui.separator();
-                ui.label(t.import_toml);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.import_path)
-                        .desired_width(240.0)
-                        .hint_text(t.import_hint),
-                );
-                if ui.button(t.load).clicked() {
-                    let path = self.import_path.trim().to_string();
-                    if path.is_empty() {
-                        self.status_msg = i18n::profile_import_path_empty(lang);
-                        self.status_ok = false;
-                    } else {
-                        match self.config.import_profile(Path::new(&path), true) {
-                            Ok(imported) => {
-                                self.save_and_reload_config(i18n::profile_imported(
-                                    lang, &imported,
-                                ));
-                            }
-                            Err(e) => {
-                                self.status_msg = i18n::profile_import_error(lang, &e);
-                                self.status_ok = false;
-                            }
+        egui::Frame::new()
+            .fill(BG_CARD)
+            .stroke(egui::Stroke::new(1.0, BORDER_MUTED))
+            .corner_radius(RADIUS_CARD)
+            .inner_margin(egui::Margin::symmetric(20, 14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add(primary_button(t.new_profile)).clicked() {
+                        self.show_new_profile = !self.show_new_profile;
+                        if self.show_new_profile {
+                            self.new_profile_name.clear();
+                            self.new_profile_desc.clear();
+                            self.draft_profile = self.capture_current_profile();
                         }
                     }
-                }
+                    if ui.add(secondary_button(t.save_config)).clicked() {
+                        self.save_and_reload_config(i18n::config_saved(lang));
+                    }
+                    if ui.add(secondary_button(t.autogen_config)).clicked() {
+                        self.autogenerate_config();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(secondary_button(t.load)).clicked() {
+                            let path = self.import_path.trim().to_string();
+                            if path.is_empty() {
+                                self.status_msg = i18n::profile_import_path_empty(lang);
+                                self.status_ok = false;
+                            } else {
+                                match self.config.import_profile(Path::new(&path), true) {
+                                    Ok(imported) => {
+                                        self.save_and_reload_config(i18n::profile_imported(
+                                            lang, &imported,
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        self.status_msg = i18n::profile_import_error(lang, &e);
+                                        self.status_ok = false;
+                                    }
+                                }
+                            }
+                        }
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.import_path)
+                                .desired_width(220.0)
+                                .hint_text(t.import_hint),
+                        );
+                        ui.label(RichText::new(t.import_toml).color(TEXT_MUTED).size(12.0));
+                    });
+                });
             });
-        });
-        ui.add_space(8.0);
+        ui.add_space(16.0);
 
         // Profile Creator / Editor card
         if self.show_new_profile {
@@ -1811,37 +1873,56 @@ impl NxctlApp {
                 ui.horizontal(|ui| {
                     card_title(ui, t.profile_editor);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(t.capture_current_state).clicked() {
+                        if ui.add(secondary_button(t.capture_current_state)).clicked() {
                             capture_requested = true;
                         }
                     });
                 });
-                ui.add_space(4.0);
+                ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    ui.label(t.name_label);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_profile_name)
-                            .desired_width(180.0)
-                            .hint_text(t.profile_name_hint),
-                    );
-                    ui.label(t.description_label);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_profile_desc)
-                            .desired_width(260.0)
-                            .hint_text(t.optional_hint),
-                    );
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(t.name_label).color(TEXT_MUTED).size(12.0));
+                        ui.add_space(4.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_profile_name)
+                                .desired_width(180.0)
+                                .hint_text(t.profile_name_hint),
+                        );
+                    });
+                    ui.add_space(12.0);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(t.description_label)
+                                .color(TEXT_MUTED)
+                                .size(12.0),
+                        );
+                        ui.add_space(4.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_profile_desc)
+                                .desired_width(280.0)
+                                .hint_text(t.optional_hint),
+                        );
+                    });
                 });
 
-                ui.add_space(6.0);
-                small_muted(
-                    ui,
-                    &i18n::fmt_cooling_rules_header(lang, self.draft_profile.cooling.len()),
+                ui.add_space(12.0);
+                hairline_divider(ui);
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new(i18n::fmt_cooling_rules_header(
+                        lang,
+                        self.draft_profile.cooling.len(),
+                    ))
+                    .color(TEXT_SECONDARY)
+                    .size(12.5),
                 );
+                ui.add_space(6.0);
                 for (idx, rule) in self.draft_profile.cooling.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!("{} / {}", rule.match_device, rule.channel))
                                 .monospace()
+                                .size(12.5)
                                 .color(TEXT_PRIMARY),
                         );
                         let is_curve = matches!(rule.target, CoolingTarget::Curve { .. });
@@ -1866,7 +1947,12 @@ impl NxctlApp {
                             CoolingTarget::Fixed { duty } => {
                                 let mut d = *duty as f32;
                                 if ui
-                                    .add(egui::Slider::new(&mut d, 0.0..=100.0).suffix("%"))
+                                    .add(
+                                        egui::Slider::new(&mut d, 0.0..=100.0)
+                                            .step_by(1.0)
+                                            .max_decimals(0)
+                                            .suffix("%"),
+                                    )
                                     .changed()
                                 {
                                     *duty = d.round().clamp(0.0, 100.0) as u8;
@@ -1885,37 +1971,46 @@ impl NxctlApp {
                     });
                 }
 
-                ui.add_space(6.0);
-                small_muted(
-                    ui,
-                    &i18n::fmt_lighting_rules_header(lang, self.draft_profile.lighting.len()),
+                ui.add_space(12.0);
+                hairline_divider(ui);
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new(i18n::fmt_lighting_rules_header(
+                        lang,
+                        self.draft_profile.lighting.len(),
+                    ))
+                    .color(TEXT_SECONDARY)
+                    .size(12.5),
                 );
+                ui.add_space(6.0);
                 for rule in &self.draft_profile.lighting {
                     let color_txt = if rule.colors.is_empty() {
                         String::new()
                     } else {
                         format!(" ({})", rule.colors.join(", "))
                     };
-                    small_muted(
-                        ui,
-                        &format!(
-                            "  • {} / {}: {}{}",
+                    ui.label(
+                        RichText::new(format!(
+                            "{} / {}: {}{}",
                             rule.match_device, rule.channel, rule.mode, color_txt
-                        ),
+                        ))
+                        .monospace()
+                        .size(12.0)
+                        .color(TEXT_MUTED),
                     );
                 }
 
-                ui.add_space(6.0);
+                ui.add_space(16.0);
                 ui.horizontal(|ui| {
-                    if ui.button(t.save_profile).clicked() {
+                    if ui.add(primary_button(t.save_profile)).clicked() {
                         save_requested = true;
                     }
-                    if ui.button(t.cancel).clicked() {
+                    if ui.add(ghost_button(t.cancel, TEXT_SECONDARY)).clicked() {
                         self.show_new_profile = false;
                     }
                 });
             });
-            ui.add_space(8.0);
+            ui.add_space(16.0);
 
             if capture_requested {
                 self.draft_profile = self.capture_current_profile();
@@ -1953,49 +2048,65 @@ impl NxctlApp {
                 let can_delete =
                     is_deletable_profile(name, &self.config.default_profile, profile_count);
                 let is_default = *name == self.config.default_profile;
+                let is_active = *name == active;
                 card_frame().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        card_title(ui, name);
-                        if *name == active {
-                            badge(ui, t.active, EMERALD);
+                        ui.label(
+                            RichText::new(name)
+                                .font(font_medium(15.0))
+                                .color(TEXT_PRIMARY),
+                        );
+                        if is_active {
+                            ui.add_space(6.0);
+                            status_dot_label(ui, SEMANTIC_OK, t.active, SEMANTIC_OK);
                         }
                         if is_default {
-                            badge(ui, "DEFAULT", CYAN);
+                            ui.add_space(6.0);
+                            quiet_chip(ui, t.default_badge, TEXT_SECONDARY);
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let del_color = if can_delete { SEMANTIC_ERR } else { TEXT_MUTED };
                             if ui
-                                .add_enabled(can_delete, egui::Button::new(t.delete))
+                                .add_enabled(can_delete, ghost_button(t.delete, del_color))
                                 .clicked()
                             {
                                 to_delete = Some(name.clone());
                             }
-                            if ui.button(t.clone).clicked() {
+                            if ui.add(secondary_button(t.clone)).clicked() {
                                 to_clone = Some((name.clone(), p.clone()));
                             }
-                            if ui.button(t.export).clicked() {
+                            if ui.add(secondary_button(t.export)).clicked() {
                                 to_export = Some(name.clone());
                             }
                             if ui
-                                .add_enabled(!is_default, egui::Button::new(t.set_default))
+                                .add_enabled(!is_default, secondary_button(t.set_default))
                                 .clicked()
                             {
                                 to_set_default = Some(name.clone());
                             }
-                            if ui.button(t.apply).clicked() {
+                            if ui.add(secondary_button(t.apply)).clicked() {
                                 to_apply = Some(name.clone());
                             }
                         });
                     });
                     if let Some(d) = &p.description {
-                        small_muted(ui, d);
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(d).color(TEXT_SECONDARY).size(13.0));
                     }
-                    small_muted(
-                        ui,
-                        &i18n::fmt_profile_rules_summary(lang, p.lighting.len(), p.cooling.len()),
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(i18n::fmt_profile_rules_summary(
+                            lang,
+                            p.lighting.len(),
+                            p.cooling.len(),
+                        ))
+                        .monospace()
+                        .size(12.0)
+                        .color(TEXT_MUTED),
                     );
                 });
-                ui.add_space(8.0);
+                ui.add_space(16.0);
             }
         });
 
@@ -2046,30 +2157,49 @@ impl eframe::App for NxctlApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::left("sidebar")
-            .exact_size(210.0)
+        let sidebar_resp = egui::Panel::left("sidebar")
+            .exact_size(240.0)
             .resizable(false)
             .frame(
                 egui::Frame::new()
                     .fill(BG_SIDEBAR)
-                    .stroke(egui::Stroke::new(1.0, BORDER_MUTED))
-                    .inner_margin(egui::Margin::same(12)),
+                    .stroke(egui::Stroke::NONE)
+                    .inner_margin(egui::Margin::symmetric(16, 20)),
             )
             .show(ui, |ui| self.sidebar(ui));
-        egui::Panel::top("topbar")
-            .exact_size(44.0)
+        let sr = sidebar_resp.response.rect;
+        ui.painter().line_segment(
+            [
+                egui::pos2(sr.right() - 0.5, sr.top()),
+                egui::pos2(sr.right() - 0.5, sr.bottom()),
+            ],
+            egui::Stroke::new(1.0, BORDER_MUTED),
+        );
+
+        let topbar_resp = egui::Panel::top("topbar")
+            .exact_size(56.0)
             .resizable(false)
             .frame(
                 egui::Frame::new()
                     .fill(BG_SIDEBAR)
-                    .stroke(egui::Stroke::new(1.0, BORDER_MUTED)),
+                    .stroke(egui::Stroke::NONE)
+                    .inner_margin(egui::Margin::symmetric(24, 0)),
             )
             .show(ui, |ui| self.top_bar(ui));
+        let tr_rect = topbar_resp.response.rect;
+        ui.painter().line_segment(
+            [
+                egui::pos2(tr_rect.left(), tr_rect.bottom() - 0.5),
+                egui::pos2(tr_rect.right(), tr_rect.bottom() - 0.5),
+            ],
+            egui::Stroke::new(1.0, BORDER_MUTED),
+        );
+
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(BG_CANVAS)
-                    .inner_margin(egui::Margin::same(16)),
+                    .inner_margin(egui::Margin::same(24)),
             )
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
@@ -2096,45 +2226,136 @@ fn ipc(socket: &std::path::Path, req: &IpcRequest, lang: Language) -> anyhow::Re
     }
 }
 
-fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.15))
-        .stroke(egui::Stroke::new(1.0, color))
-        .corner_radius(egui::CornerRadius::same(4))
-        .inner_margin(egui::Margin::symmetric(8, 2))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).color(color).size(11.0).strong());
-        });
+fn sidebar_nav_row(ui: &mut egui::Ui, view: View, selected: bool, label: &str) -> bool {
+    let width = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 36.0), egui::Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+
+    let hover_t = ui.ctx().animate_bool_with_time_and_easing(
+        resp.id.with("hover"),
+        resp.hovered(),
+        0.14,
+        easing::quadratic_out,
+    );
+
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, RADIUS_CONTROL, BG_CONTROL);
+        painter.rect_stroke(
+            rect,
+            RADIUS_CONTROL,
+            egui::Stroke::new(1.0, BORDER_ACTIVE),
+            egui::StrokeKind::Inside,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(rect.left() + 8.0, rect.top() + 1.0),
+                egui::pos2(rect.right() - 8.0, rect.top() + 1.0),
+            ],
+            egui::Stroke::new(1.0, HIGHLIGHT_TOP),
+        );
+        let pill = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 5.5, rect.center().y),
+            egui::vec2(3.0, 16.0),
+        );
+        painter.rect_filled(pill, egui::CornerRadius::same(2), ACCENT);
+    } else if hover_t > 0.01 {
+        painter.rect_filled(rect, RADIUS_CONTROL, BG_CARD.gamma_multiply(hover_t));
+    }
+
+    let icon_col = if selected {
+        TEXT_PRIMARY
+    } else if resp.hovered() {
+        TEXT_SECONDARY
+    } else {
+        TEXT_MUTED
+    };
+    let text_col = if selected || resp.hovered() {
+        TEXT_PRIMARY
+    } else {
+        TEXT_SECONDARY
+    };
+
+    let inner = rect.shrink2(egui::vec2(14.0, 0.0));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            match view {
+                View::Dashboard => draw_nav_dashboard_icon(ui, 16.0, icon_col),
+                View::Fans => draw_fan_icon(ui, 16.0, icon_col),
+                View::Rgb => draw_nav_rgb_icon(ui, 16.0, icon_col),
+                View::Profiles => draw_nav_profiles_icon(ui, 16.0, icon_col),
+            }
+            let rich = if selected {
+                RichText::new(label).font(font_medium(14.0)).color(text_col)
+            } else {
+                RichText::new(label).size(14.0).color(text_col)
+            };
+            ui.label(rich);
+        },
+    );
+
+    resp.clicked()
 }
 
 fn card_title(ui: &mut egui::Ui, text: &str) {
     ui.label(
-        RichText::new(text.to_uppercase())
-            .color(TEXT_SECONDARY)
-            .size(12.0)
-            .strong(),
+        RichText::new(text)
+            .font(font_medium(14.0))
+            .color(TEXT_PRIMARY),
     );
-    ui.add_space(4.0);
 }
 
 fn small_muted(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).color(TEXT_MUTED).size(11.0));
+    ui.label(RichText::new(text).color(TEXT_MUTED).size(12.0));
 }
 
-#[derive(Clone, Copy)]
-enum DashboardIcon {
-    Cpu,
-    Gpu,
-    Pump,
-    Sensor,
+fn fixed_temp_grid(_input: GridInput) -> Vec<GridMark> {
+    [20.0, 40.0, 60.0, 80.0, 100.0]
+        .into_iter()
+        .map(|value| GridMark {
+            value,
+            step_size: 20.0,
+        })
+        .collect()
 }
 
-fn draw_dashboard_icon(ui: &mut egui::Ui, icon: DashboardIcon, size: f32, color: Color32) {
-    match icon {
-        DashboardIcon::Cpu => draw_cpu_icon(ui, size, color),
-        DashboardIcon::Gpu => draw_gpu_icon(ui, size, color),
-        DashboardIcon::Pump => draw_pump_icon(ui, size, color),
-        DashboardIcon::Sensor => draw_sensor_icon(ui, size, color),
+fn fixed_fan_temp_grid(_input: GridInput) -> Vec<GridMark> {
+    (0..=20)
+        .map(|i| {
+            let value = (i * 5) as f64;
+            let step_size = if i % 2 == 0 { 10.0 } else { 5.0 };
+            GridMark { value, step_size }
+        })
+        .collect()
+}
+
+fn fixed_percent_grid(_input: GridInput) -> Vec<GridMark> {
+    [0.0, 25.0, 50.0, 75.0, 100.0]
+        .into_iter()
+        .map(|value| GridMark {
+            value,
+            step_size: 25.0,
+        })
+        .collect()
+}
+
+fn temp_plot_hover_label(pos: &HoverPosition<'_>) -> Option<String> {
+    match pos {
+        HoverPosition::NearDataPoint { position, .. } | HoverPosition::Elsewhere { position } => {
+            Some(format!("{:.1}°C", position.y))
+        }
+    }
+}
+
+fn curve_plot_hover_label(pos: &HoverPosition<'_>) -> Option<String> {
+    match pos {
+        HoverPosition::NearDataPoint { position, .. } | HoverPosition::Elsewhere { position } => {
+            Some(format!("{:.0}°C · {:.0}%", position.x, position.y))
+        }
     }
 }
 
@@ -2149,7 +2370,6 @@ struct TempCardOut {
 fn temp_card(
     ui: &mut egui::Ui,
     id: &str,
-    icon: DashboardIcon,
     title: &str,
     device_name: Option<&str>,
     value: Option<f32>,
@@ -2167,30 +2387,46 @@ fn temp_card(
     let mut new_height = plot_height;
     let mut frame = card_frame();
     if is_drag_source {
-        frame = frame.stroke(egui::Stroke::new(1.5, CYAN));
+        frame = frame.stroke(egui::Stroke::new(1.5, ACCENT));
     }
+    let range_text = (history.len() >= 2)
+        .then(|| temp_range(history))
+        .flatten()
+        .filter(|(lo, hi)| (hi - lo) >= 0.3)
+        .map(|(lo, hi)| format!("{lo:.0}°–{hi:.0}°"));
     let frame_resp = frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             let drag_resp = drag_handle(ui, egui::Id::unique(("drag_card", id)), drag_tooltip);
             drag_started = drag_resp.drag_started();
-            draw_dashboard_icon(ui, icon, 15.0, accent);
+            let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 14.0), egui::Sense::hover());
+            ui.painter().circle_filled(dot_rect.center(), 3.0, accent);
             card_title(ui, title);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if pin_button(ui, true, accent, demote_label) {
+                if pin_button(ui, true, demote_label) {
                     demote = true;
                 }
                 if let Some(dev_name) = device_name.map(str::trim).filter(|s| !s.is_empty()) {
-                    ui.add_space(4.0);
+                    ui.add_space(8.0);
                     ui.add(
-                        egui::Label::new(RichText::new(dev_name).color(TEXT_SECONDARY).size(11.0))
+                        egui::Label::new(RichText::new(dev_name).color(TEXT_MUTED).size(12.0))
                             .truncate(),
                     );
                 }
             });
         });
+        ui.add_space(12.0);
         ui.horizontal(|ui| {
-            draw_radial_gauge(ui, value, max, sub, accent);
+            draw_radial_gauge(
+                ui,
+                egui::Id::unique(("gauge", id)),
+                value,
+                max,
+                sub,
+                range_text.as_deref(),
+                accent,
+            );
+            ui.add_space(16.0);
             let pts: Vec<[f64; 2]> = history
                 .iter()
                 .enumerate()
@@ -2202,25 +2438,47 @@ fn temp_card(
                 .allow_drag(false)
                 .allow_zoom(false)
                 .allow_scroll(false)
+                .show_background(true)
+                .grid_color(PLOT_GRID)
+                .grid_fade(0.85)
+                .show_axes([false, true])
+                .show_grid([false, true])
+                .show_x(false)
+                .y_axis_min_width(36.0)
+                .y_grid_spacer(fixed_temp_grid)
+                .y_axis_formatter(|mark, _| format!("{:.0}°", mark.value))
+                .label_formatter(temp_plot_hover_label)
+                .set_margin_fraction(egui::vec2(0.02, 0.08))
                 .include_x(0.0)
                 .include_x((HISTORY_LEN - 1) as f64)
                 .include_y(20.0)
                 .include_y(100.0)
                 .show(ui, |p| {
+                    let last_pt = pts.last().copied();
                     p.line(
                         Line::new(title, PlotPoints::from(pts))
                             .color(accent)
-                            .width(2.0),
+                            .width(2.0)
+                            .fill(20.0)
+                            .fill_alpha(0.10),
                     );
+                    if let Some(pt) = last_pt {
+                        p.points(
+                            Points::new("", vec![pt])
+                                .color(accent)
+                                .radius(3.0)
+                                .highlight(false),
+                        );
+                    }
                 });
         });
-        ui.add_space(2.0);
+        ui.add_space(4.0);
         new_height = card_resize_handle(
             ui,
             egui::Id::unique(("resize_card", id)),
             plot_height,
-            90.0,
-            340.0,
+            96.0,
+            320.0,
         );
     });
     TempCardOut {
@@ -2264,7 +2522,7 @@ fn render_dashboard_panel_by_id(
                 *drag_started_id = Some(PANEL_PWM_ID.into());
             }
             rendered_panels.push((PANEL_PWM_ID.into(), col_idx, out.card_rect));
-            ui.add_space(8.0);
+            ui.add_space(16.0);
         }
         PANEL_OTHER_ID => {
             let (promoted, out) = other_sensors_card(
@@ -2285,11 +2543,10 @@ fn render_dashboard_panel_by_id(
                 *drag_started_id = Some(PANEL_OTHER_ID.into());
             }
             rendered_panels.push((PANEL_OTHER_ID.into(), col_idx, out.card_rect));
-            ui.add_space(8.0);
+            ui.add_space(16.0);
         }
         _ => {
             struct TempCardSpec<'a> {
-                icon: DashboardIcon,
                 title: String,
                 value: Option<f32>,
                 sub: &'a str,
@@ -2301,27 +2558,24 @@ fn render_dashboard_panel_by_id(
             let dev_name = resolve_featured_device_name(id, snap);
             let card_spec = match id {
                 "cpu" => Some(TempCardSpec {
-                    icon: DashboardIcon::Cpu,
                     title: "CPU".to_string(),
                     value: snap.cpu_c,
-                    sub: "PACKAGE",
-                    accent: CYAN,
+                    sub: t.cpu_sub,
+                    accent: SERIES_CPU,
                     hist: &snap.cpu_history,
                 }),
                 "gpu" => Some(TempCardSpec {
-                    icon: DashboardIcon::Gpu,
                     title: "GPU".to_string(),
                     value: snap.gpu_c,
-                    sub: "NVIDIA",
-                    accent: MAGENTA,
+                    sub: t.gpu_sub,
+                    accent: SERIES_GPU,
                     hist: &snap.gpu_history,
                 }),
                 "aio" => snap.liquid_c.map(|temp| TempCardSpec {
-                    icon: DashboardIcon::Pump,
                     title: t.aio_liquid.to_string(),
                     value: Some(temp),
                     sub: t.liquid_sub,
-                    accent: EMERALD,
+                    accent: SERIES_AIO,
                     hist: &snap.liquid_history,
                 }),
                 other => snap
@@ -2330,16 +2584,12 @@ fn render_dashboard_panel_by_id(
                     .find(|s| hwmon_sensor_id(s) == other)
                     .map(|s| {
                         let (tag, accent) = classify_hwmon_sensor(&s.name, lang);
-                        let icon = if tag == "iGPU" {
-                            DashboardIcon::Gpu
-                        } else {
-                            DashboardIcon::Sensor
-                        };
-                        let label = s.label.as_deref().unwrap_or(&s.input_file);
-                        let title = format!("{} ({label})", s.name);
+                        let label = s.label.as_deref().unwrap_or(
+                            s.input_file.strip_suffix("_input").unwrap_or(&s.input_file),
+                        );
+                        let title = format!("{} · {label}", s.name);
                         let hist = snap.hwmon_history.get(other).unwrap_or(&empty_hist);
                         TempCardSpec {
-                            icon,
                             title,
                             value: Some(s.temp_c),
                             sub: tag,
@@ -2352,7 +2602,6 @@ fn render_dashboard_panel_by_id(
                 let out = temp_card(
                     ui,
                     id,
-                    spec.icon,
                     &spec.title,
                     dev_name.as_deref(),
                     spec.value,
@@ -2375,7 +2624,7 @@ fn render_dashboard_panel_by_id(
                     *drag_started_id = Some(id.to_string());
                 }
                 rendered_panels.push((id.to_string(), col_idx, out.card_rect));
-                ui.add_space(8.0);
+                ui.add_space(16.0);
             }
         }
     }
@@ -2469,9 +2718,9 @@ fn main() -> anyhow::Result<()> {
         };
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("NXCTL")
-        .with_inner_size([1180.0, 760.0])
-        .with_min_inner_size([900.0, 600.0])
+        .with_title("nxctl")
+        .with_inner_size([1240.0, 780.0])
+        .with_min_inner_size([960.0, 620.0])
         .with_visible(!cli.minimized);
     if let Some(icon) = tray::load_window_icon() {
         viewport = viewport.with_icon(Arc::new(icon));
@@ -2488,31 +2737,31 @@ fn main() -> anyhow::Result<()> {
     .map_err(|e| anyhow!("{e}"))
 }
 
-/// Classifies a `hwmon` driver name into a friendly category label and accent color.
+/// Classifies a `hwmon` driver name into a friendly category label and series dot color.
 fn classify_hwmon_sensor(name: &str, lang: Language) -> (&'static str, Color32) {
     let lower = name.to_ascii_lowercase();
     if lower.contains("spd5118") || lower.contains("jc42") || lower.contains("ddr") {
-        ("RAM", CYAN)
+        ("RAM", SERIES_CPU)
     } else if lower.contains("nvme") {
-        ("SSD", MAGENTA)
+        ("SSD", SERIES_EXTRA)
     } else if lower.contains("drivetemp") || lower.contains("sata") || lower.contains("hdd") {
-        ("HDD", MAGENTA)
+        ("HDD", SERIES_EXTRA)
     } else if lower.contains("amdgpu") || lower.contains("radeon") || lower.contains("nouveau") {
-        ("iGPU", CYAN)
+        ("iGPU", SERIES_CPU)
     } else if lower.contains("wifi")
         || lower.contains("mt79")
         || lower.contains("iwlwifi")
         || lower.contains("ath")
     {
-        ("WI-FI", EMERALD)
+        ("Wi-Fi", SERIES_AIO)
     } else if lower.contains("r8169")
         || lower.contains("igc")
         || lower.contains("e1000")
         || lower.contains("eth")
     {
-        (i18n::tr(lang).net_tag, EMERALD)
+        (i18n::tr(lang).net_tag, SERIES_AIO)
     } else {
-        ("SYS", TEXT_SECONDARY)
+        ("Sys", TEXT_MUTED)
     }
 }
 
@@ -2543,38 +2792,74 @@ fn secondary_hwmon_sensors(
 #[allow(clippy::too_many_arguments)]
 fn compact_sensor_row(
     ui: &mut egui::Ui,
-    icon: DashboardIcon,
     tag: &str,
-    tag_color: Color32,
+    dot_color: Color32,
     name: &str,
     sub: &str,
     temp: Option<f32>,
     feature_label: &str,
 ) -> bool {
     let mut promote = false;
-    let temp_color = match temp {
-        Some(t) if t >= 70.0 => CRIMSON,
-        Some(t) if t >= 50.0 => AMBER,
-        Some(_) => EMERALD,
-        None => TEXT_MUTED,
-    };
-    ui.horizontal(|ui| {
-        draw_dashboard_icon(ui, icon, 13.0, tag_color);
-        badge(ui, tag, tag_color);
-        ui.label(RichText::new(name).color(TEXT_PRIMARY).size(12.0));
-        ui.label(
-            RichText::new(format!("({sub})"))
-                .color(TEXT_MUTED)
-                .size(11.0),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if pin_button(ui, false, tag_color, feature_label) {
-                promote = true;
-            }
-            let txt = temp.map_or_else(|| "-- °C".to_string(), |t| format!("{t:.1} °C"));
-            ui.label(RichText::new(txt).monospace().strong().color(temp_color));
+    let clean_sub = sub.strip_suffix("_input").unwrap_or(sub);
+    let temp_color = temp_semantic_color(temp);
+
+    let row_resp = egui::Frame::new()
+        .corner_radius(RADIUS_CHIP)
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.set_min_height(22.0);
+            ui.horizontal(|ui| {
+                // Fixed 72px left category cell so every sensor name aligns cleanly on one column.
+                ui.allocate_ui_with_layout(
+                    egui::vec2(72.0, 20.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_width(72.0);
+                        ui.set_max_width(72.0);
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let (dot_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(8.0, 14.0), egui::Sense::hover());
+                        ui.painter()
+                            .circle_filled(dot_rect.center(), 3.0, dot_color);
+                        ui.label(RichText::new(tag).monospace().size(11.5).color(TEXT_MUTED));
+                    },
+                );
+                ui.add_space(4.0);
+
+                ui.label(RichText::new(name).color(TEXT_PRIMARY).size(13.0));
+                if !clean_sub.is_empty() {
+                    ui.label(
+                        RichText::new(format!("· {clean_sub}"))
+                            .color(TEXT_MUTED)
+                            .size(12.0),
+                    );
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if pin_button(ui, false, feature_label) {
+                        promote = true;
+                    }
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format_temp(temp))
+                            .monospace()
+                            .size(12.5)
+                            .color(temp_color),
+                    );
+                });
+            });
         });
-    });
+
+    if row_resp.response.hovered() {
+        ui.painter().rect_stroke(
+            row_resp.response.rect,
+            RADIUS_CHIP,
+            egui::Stroke::new(1.0, BORDER_MUTED),
+            egui::StrokeKind::Inside,
+        );
+    }
+
     promote
 }
 
@@ -2597,7 +2882,7 @@ fn scrollable_dashboard_card(
     let mut new_height = None;
     let mut frame = card_frame();
     if is_drag_source {
-        frame = frame.stroke(egui::Stroke::new(1.5, CYAN));
+        frame = frame.stroke(egui::Stroke::new(1.5, ACCENT));
     }
     let frame_resp = frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -2607,6 +2892,7 @@ fn scrollable_dashboard_card(
             drag_started = drag_resp.drag_started();
             header(ui);
         });
+        ui.add_space(12.0);
         let cur_h = if let Some(h) = custom_height {
             egui::ScrollArea::vertical()
                 .id_salt(("scroll_card", panel_id))
@@ -2622,7 +2908,7 @@ fn scrollable_dashboard_card(
             let body_resp = ui.scope(body);
             body_resp.response.rect.height().clamp(80.0, 520.0)
         };
-        ui.add_space(2.0);
+        ui.add_space(4.0);
         let next_h = card_resize_handle(
             ui,
             egui::Id::unique(("resize_card", panel_id)),
@@ -2655,17 +2941,30 @@ fn pwm_headers_card(
         custom_height,
         is_drag_source,
         |ui| {
-            draw_fan_icon(ui, 15.0, CYAN);
             card_title(ui, t.pwm_headers);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!("{}", snap.channels.len()))
+                        .monospace()
+                        .size(12.0)
+                        .color(TEXT_MUTED),
+                );
+            });
         },
         |ui| {
             if snap.channels.is_empty() {
                 small_muted(ui, t.no_nzxt_channels);
             }
-            for c in &snap.channels {
+            for (idx, c) in snap.channels.iter().enumerate() {
                 let is_pump = is_pump_channel(&c.channel);
-                let accent = if is_pump { MAGENTA } else { CYAN };
-                draw_pwm_bar(ui, &c.label, c.rpm, c.duty.unwrap_or(0.0), accent, is_pump);
+                draw_pwm_bar(
+                    ui,
+                    egui::Id::unique(("pwm_bar", &c.device, &c.channel, idx)),
+                    &c.label,
+                    c.rpm,
+                    c.duty.unwrap_or(0.0),
+                    is_pump,
+                );
             }
         },
     )
@@ -2702,10 +3001,14 @@ fn other_sensors_card(
         custom_height,
         is_drag_source,
         |ui| {
-            draw_sensor_icon(ui, 15.0, CYAN);
             card_title(ui, t.other_sensors);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                badge(ui, &format!("{total}"), CYAN);
+                ui.label(
+                    RichText::new(format!("{total}"))
+                        .monospace()
+                        .size(12.0)
+                        .color(TEXT_MUTED),
+                );
             });
         },
         |ui| {
@@ -2715,28 +3018,14 @@ fn other_sensors_card(
             }
             if show_cpu
                 && compact_sensor_row(
-                    ui,
-                    DashboardIcon::Cpu,
-                    "CPU",
-                    CYAN,
-                    "CPU",
-                    "PACKAGE",
-                    snap.cpu_c,
-                    t.feature,
+                    ui, "CPU", SERIES_CPU, "CPU", t.cpu_sub, snap.cpu_c, t.feature,
                 )
             {
                 to_promote = Some("cpu".into());
             }
             if show_gpu
                 && compact_sensor_row(
-                    ui,
-                    DashboardIcon::Gpu,
-                    "GPU",
-                    MAGENTA,
-                    "GPU",
-                    "NVIDIA",
-                    snap.gpu_c,
-                    t.feature,
+                    ui, "GPU", SERIES_GPU, "GPU", t.gpu_sub, snap.gpu_c, t.feature,
                 )
             {
                 to_promote = Some("gpu".into());
@@ -2744,9 +3033,8 @@ fn other_sensors_card(
             if show_aio
                 && compact_sensor_row(
                     ui,
-                    DashboardIcon::Pump,
                     "AIO",
-                    EMERALD,
+                    SERIES_AIO,
                     "AIO",
                     t.liquid_label,
                     snap.liquid_c,
@@ -2757,15 +3045,9 @@ fn other_sensors_card(
             }
             for (s, id) in secondary {
                 let (tag, tag_color) = classify_hwmon_sensor(&s.name, lang);
-                let icon = if tag == "iGPU" {
-                    DashboardIcon::Gpu
-                } else {
-                    DashboardIcon::Sensor
-                };
                 let label = s.label.as_deref().unwrap_or(&s.input_file);
                 if compact_sensor_row(
                     ui,
-                    icon,
                     tag,
                     tag_color,
                     &s.name,
@@ -2812,17 +3094,17 @@ mod liquid_tests {
         assert_eq!(classify_hwmon_sensor("amdgpu", Language::Es).0, "iGPU");
         assert_eq!(
             classify_hwmon_sensor("mt7921_phy0", Language::Es).0,
-            "WI-FI"
+            "Wi-Fi"
         );
         assert_eq!(
             classify_hwmon_sensor("r8169_0_c00:00", Language::Es).0,
-            "RED"
+            "Red"
         );
         assert_eq!(
             classify_hwmon_sensor("r8169_0_c00:00", Language::En).0,
-            "NET"
+            "Net"
         );
-        assert_eq!(classify_hwmon_sensor("prom21_xhci", Language::Es).0, "SYS");
+        assert_eq!(classify_hwmon_sensor("prom21_xhci", Language::Es).0, "Sys");
 
         let sensors = [
             sensor("k10temp", 45.0),
