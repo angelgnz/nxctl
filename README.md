@@ -98,8 +98,8 @@ Install `nxctl` and receive automatic signed updates through the central [`angel
 
   ```sh
   curl -fsSL https://angelgnz.github.io/packages/gpg.key | sudo pacman-key --add -
-  sudo pacman-key --lsign-key 44B0056D18E88F598404490A1ACBF949D4EB5BDD
-  printf '\n[angelgnz]\nSigLevel = Required DatabaseOptional\nServer = https://angelgnz.github.io/packages/arch/$arch\n' | sudo tee -a /etc/pacman.conf
+  sudo pacman-key --lsign-key 4663D045FAB8BFB786EFCDE1246A5814FD9D8BB8
+  grep -qxF '[angelgnz]' /etc/pacman.conf || printf '\n[angelgnz]\nSigLevel = Required DatabaseOptional\nServer = https://angelgnz.github.io/packages/arch/$arch\n' | sudo tee -a /etc/pacman.conf
   sudo pacman -Syu nxctl
   ```
 

@@ -24,7 +24,7 @@ touch "${REPO_DIR}/.nojekyll"
 if [ -f "${SCRIPT_DIR}/index.html" ] && [ ! -f "${REPO_DIR}/index.html" ]; then
   install -m644 "${SCRIPT_DIR}/index.html" "${REPO_DIR}/index.html"
 fi
-install -m644 "${SCRIPT_DIR}/gpg.key" "${REPO_DIR}/gpg.key"
+gpg --armor --export "${GPG_KEY_ID}" > "${REPO_DIR}/gpg.key"
 gpg --batch --yes --dearmor -o "${REPO_DIR}/gpg.gpg" "${REPO_DIR}/gpg.key"
 
 # 1. APT repository
@@ -72,9 +72,8 @@ if [ "${#rpms[@]}" -eq 0 ]; then
   exit 1
 fi
 rm -f "${REPO_DIR}/rpm/Packages/nxctl-"*.rpm
-for rpm_file in "${rpms[@]}"; do
-  dest_rpm="${REPO_DIR}/rpm/Packages/$(basename "${rpm_file}")"
-  cp -f "${rpm_file}" "${dest_rpm}"
+cp -f "${rpms[@]}" "${REPO_DIR}/rpm/Packages/"
+for dest_rpm in "${REPO_DIR}/rpm/Packages/"*.rpm; do
   rpmsign \
     --define "_gpg_name ${GPG_KEY_ID}" \
     --define "__gpg $(command -v gpg)" \
