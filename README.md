@@ -35,7 +35,7 @@ Grouped per-device fan curve plots with live operating-point overlay and per-cha
 ![Fans](assets/screenshots/fans.png)
 
 ### RGB Lighting
-Per-device and per-channel RGB mode/color controls plus **Pywal Sync** with live wallpaper palette swatches, a **Saturate (vivid)** HSV chroma boost checkbox and `0%–100%` slider, palette offset controls, and automatic daemon synchronization.
+Per-device and per-channel RGB mode/color controls plus **Pywal Sync** with live wallpaper palette swatches, a **Boost saturation** HSV chroma boost checkbox and `0%–100%` slider, palette offset controls, and automatic daemon synchronization.
 
 ![RGB Lighting](assets/screenshots/rgb.png)
 
@@ -49,7 +49,7 @@ Create, capture from current state, clone, edit, import/export portable `.toml` 
 All user-facing tools (`nxctl-gui`, `nxctl`, and `nxctl tui`) support **English (`en`)** and **Spanish (`es`)**:
 
 - **Config file (`~/.config/nxctl/config.toml`)**: created automatically from detected hardware on first launch of `nxctld`, `nxctl-gui`, or `nxctl tui`; set `language = "en"` or `language = "es"` (defaults to `"es"` if omitted) and `close_to_tray = true` to hide to the system tray on close.
-- **GUI**: choose **English** / **Español** directly from the **LANGUAGE** selector in the bottom-left sidebar card (saved automatically to `config.toml`), or start with `nxctl-gui --lang en`.
+- **GUI**: choose **English** / **Español** directly from the **Language** selector in the bottom-left sidebar card (saved automatically to `config.toml`), or start with `nxctl-gui --lang en`.
 - **CLI**: pass `--lang en` or `--lang es` globally (for example, `nxctl --lang en sensors`), or set `NXCTL_LANG` / `LANG`.
 - **TUI**: press `l` inside `nxctl tui` to toggle between English and Spanish live.
 
